@@ -1,6 +1,6 @@
-use std::{collections::HashMap, fmt::write, net::SocketAddr, str::from_utf8, sync::Arc};
+use std::{collections::HashMap, f32::consts::E, fmt::write, net::SocketAddr, str::from_utf8, sync::Arc};
 
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpSocket, TcpStream, tcp::{OwnedReadHalf, OwnedWriteHalf}}, sync::{RwLock, oneshot}};
+use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpSocket, TcpStream, tcp::{OwnedReadHalf, OwnedWriteHalf}}, sync::{RwLock, mpsc, oneshot}};
 
 use crate::{cluster::{self, Controller_Config}, error::ConrtollerError};
 
@@ -8,29 +8,37 @@ use crate::{cluster::{self, Controller_Config}, error::ConrtollerError};
 
 use tokio::time::{timeout, Duration};
 
+
+#[derive(Debug)]
+
 pub struct Controller{
-    id:u64,
+    pub id:u64,
     port:u32,
     ip:SocketAddr,
     socket:TcpListener,
-    peers_config:Vec<cluster::Controller_Config>,
-    peer_sockets:RwLock<HashMap<String,peer>>,
+    pub peers_config:Vec<cluster::Controller_Config>,
+    pub peer_sockets:RwLock<HashMap<SocketAddr,Arc<peer>>>,
 
 
     timer:i32,
-    pub leader:bool,
+    pub leader:RwLock<bool>,
     pub leader_addr:Option<SocketAddr>,
     term:RwLock<u64>,
     
-    clients:RwLock<HashMap<SocketAddr,Arc<OwnedWriteHalf>>> 
-
+    clients:RwLock<HashMap<SocketAddr,Arc<RwLock<OwnedWriteHalf>>>> ,
+    data:HashMap<String,SocketAddr>
 }
 
 
-struct peer{
-    reader:OwnedReadHalf,
-    writer:OwnedWriteHalf,
-    id:u64,
+#[derive(Debug)]
+struct  broker_id(u64);
+
+#[derive(Debug)]
+
+pub struct peer{
+    pub reader:RwLock<OwnedReadHalf>,
+    pub writer:RwLock<OwnedWriteHalf>,
+    pub id:u64,
     // addr:String
 }
 
@@ -40,20 +48,30 @@ struct peer{
 
 impl Controller {
     pub async fn new(controller:Controller_Config,peers_config:Vec<Controller_Config>,isleader:bool)->Result<Self,ConrtollerError>{
-        let socket=CreateControllerSocket(controller.port.clone(), controller.ip.clone()).await?;
+        let socket=match CreateControllerSocket(controller.ip.clone()).await{
+            Ok(a)=>{
+                println!("Started teh controller with args-{:?}",controller);
+                Ok(a)
 
-        let mut map=HashMap::new();
-        for peer in peers_config.clone(){
-            if peer.id == controller.id {
-                continue;
             }
-            let (reader,writer,addr,controller_id)= CreatePeerSockets(peer).await?;
-            map.insert(addr, peer{
-                reader,
-                writer,
-                id:controller_id,
-            });
-        }
+            Err(e)=>{
+                println!("Failed: controller with args-{:?}",controller);
+                Err(e)
+            }
+        }?;
+
+        // let mut map=HashMap::new();
+        // for peer in peers_config.clone(){
+        //     if peer.id == controller.id {
+        //         continue;
+        //     }
+        //     let (reader,writer,addr,controller_id)= CreatePeerSockets(peer).await?;
+        //     map.insert(addr, peer{
+        //         reader,
+        //         writer,
+        //         id:controller_id,
+        //     });
+        // }
 
         Ok(Self{
             id:controller.id,
@@ -61,14 +79,17 @@ impl Controller {
             ip:controller.ip,
             socket,
             peers_config,
-            peer_sockets:RwLock::new(map),
+            peer_sockets:RwLock::new(HashMap::new()),
             timer:controller.election_timer,
-            leader:isleader,
+            leader:RwLock::new(isleader),
             leader_addr:None,
             clients:RwLock::new(HashMap::new()),
             term:RwLock::new(0),
+            data:HashMap::new()
         })
     }
+
+    
     
     pub fn Init(mut self,start_loop_signal:oneshot::Receiver<u8>)->oneshot::Receiver<u8>{
         let (server_setup_sender_sign,server_setup_recv_sign)=oneshot::channel::<u8>();
@@ -76,7 +97,182 @@ impl Controller {
         tokio::spawn(async move{
             let controller=Arc::new(self);
             server_setup_sender_sign.send(1).unwrap();
+
             start_loop_signal.await.unwrap();
+
+            for peer in controller.peers_config.clone(){
+                if peer.id == controller.id {
+                    continue;
+                }
+                let (reader,writer,addr,controller_id)= match CreatePeerSockets(peer.clone()).await{
+                    Ok(a)=>{
+                        // println!("Staeted the peer socket for teh controller with args {:?} \nand teh peer socket config is {:?}",controller,peer);
+                        Ok(a)
+                    }
+                    Err(e)=>{
+                        println!("Faile to create peer socket for teh controller with args {:?} \nand teh peer socket config is {:?}",controller,peer);
+                        Err(e)
+                    }
+                }.unwrap();
+                
+                controller.peer_sockets.write().await.insert(
+                    peer.ip,
+                    Arc::new(peer {
+                        reader:RwLock::new(reader),
+                        writer:RwLock::new(writer),
+                        id:peer.id,
+                    })
+                );
+            }
+   
+
+            let (timer_signal_sender, mut receiver) = mpsc::channel::<u8>(100);
+
+
+            
+            let controller_=Arc::clone(&controller);
+            tokio::spawn(async move {
+                let controller=controller_;
+                loop {
+                    tokio::select! {
+
+                        // Heartbeat / reset signal received
+                        signal = receiver.recv() => {
+                            match signal {
+                                Some(_) => {
+                                    println!("Reset election timer");
+                                    continue;
+                                }
+
+                                None => {
+                                    println!("Timer channel closed");
+                                    break;
+                                }
+                            }
+                        }
+
+                        // No signal before timeout
+                        _ = tokio::time::sleep(Duration::from_millis(controller.timer as u64)) => {
+
+                            println!("Election timeout for {}",controller.id);
+                            let mut peers: Vec<(SocketAddr, Arc<peer>)> = {
+                                let peer_sockets = controller.peer_sockets.read().await;
+
+                                peer_sockets
+                                    .iter()
+                                    .map(|(addr, peer)| (*addr, Arc::clone(peer)))
+                                    .collect()
+                            };
+                            
+                            let peers_len=peers.len();
+                            let mut responses=Vec::new();
+                            for (addr, peer)in peers.iter_mut(){
+
+                                let mut buf=Vec::new();
+                                let mut final_buf=Vec::new();
+
+                                let command_buf=b"election";
+                                let len=(command_buf.len() as u64).to_be_bytes();
+
+                                final_buf.extend_from_slice(&len);
+                                final_buf.extend_from_slice(command_buf);
+
+                                let term_buf=(*controller.term.read().await+1).to_be_bytes();
+                                let len=(term_buf.len() as u64).to_be_bytes();
+
+                                buf.extend_from_slice(&len);
+                                buf.extend_from_slice(&term_buf);
+
+
+                                let socket_addr_buf = controller.ip.to_string().into_bytes();
+
+                                buf.extend_from_slice(&(socket_addr_buf.len() as u64).to_be_bytes());
+                                buf.extend_from_slice(&socket_addr_buf);
+
+                                
+                                let len=(buf.len() as u64).to_be_bytes();
+                                final_buf.extend_from_slice(&len);
+                                final_buf.extend_from_slice(&buf);
+
+                                peer.writer.write().await.write_all(&final_buf).await.unwrap();
+                                // println!("sent teh req from contrller {} to peer {}",controller.id,peer.id);
+                                let mut len_buf = [0u8; 8];
+                                peer.reader.write().await.read_exact(&mut len_buf).await.unwrap();
+                                // println!("recive1 the req at contrller {} from peer {}",controller.id,peer.id);
+
+                                let len = u64::from_be_bytes(len_buf) as usize;
+                                let mut response=vec![0u8;len];
+                                peer.reader.write().await.read_exact(&mut response).await.unwrap();
+                                // println!("{:?}",response);
+                                // println!("recive2 the req at contrller {} from peer {}",controller.id,peer.id);
+
+                                responses.push(response);
+
+
+                            }
+
+                            let mut accept_count = 1;
+                            let mut reject_count = 0;
+
+                            for response in &responses {
+                                match response.as_slice() {
+                                    b"accept" => accept_count += 1,
+                                    b"reject" => reject_count += 1,
+                                    _ => println!("Unknown response: {:?}", response),
+                                }
+                            }
+
+                            if accept_count>=peers_len/2 {
+                                let mut leader=controller.leader.write().await;
+                                *leader=true;
+
+                                //this is to when the leader is elcted to inform the other peers 
+                                // for (addr, peer)in peers.iter_mut(){
+                                //     let mut buf=Vec::new();
+                                //     let mut final_buf=Vec::new();
+
+                                //     let command_buf=b"leader_elected";
+                                //     let len=(command_buf.len() as u64).to_be_bytes();
+
+                                //     final_buf.extend_from_slice(&len);
+                                //     final_buf.extend_from_slice(command_buf);
+
+                                //     let term_buf=(*controller.term.read().await).to_be_bytes();
+                                //     let len=(term_buf.len() as u64).to_be_bytes();
+
+                                //     buf.extend_from_slice(&len);
+                                //     buf.extend_from_slice(&term_buf);
+
+
+                                //     let socket_addr_buf = controller.ip.to_string().into_bytes();
+
+                                //     buf.extend_from_slice(&(socket_addr_buf.len() as u64).to_be_bytes());
+                                //     buf.extend_from_slice(&socket_addr_buf);
+
+                                    
+                                //     let len=(buf.len() as u64).to_be_bytes();
+                                //     final_buf.extend_from_slice(&len);
+                                //     final_buf.extend_from_slice(&buf);
+
+                                //     peer.writer.write().await.write_all(&final_buf).await.unwrap();
+                                // }
+
+                                SendHeartBeats(Arc::clone(&controller));
+                                break;
+                                
+                            }
+                            
+                            
+                            
+                            // println!("responses are {:?}",responses);
+                            continue;
+                        }
+                    }
+                }
+            });
+
+
+
             loop{
                 let (stream,client_addr)=controller.socket.accept().await.unwrap();
 
@@ -84,89 +280,46 @@ impl Controller {
             
                 let mut clients=controller.clients.write().await;
 
-                clients.insert(client_addr, Arc::new((writer)));
+                clients.insert(client_addr.clone(), Arc::new(RwLock::new(writer)));
 
                 let client_controller=Arc::clone(&controller);
 
                 drop(clients);
+                let signal_for_heartbeat=timer_signal_sender.clone();
 
                 tokio::spawn(async move{
-                    
-
-                
                     loop {
                         let mut buf = [0u8; 8];
-
-
-                        match timeout(Duration::from_millis(client_controller.timer as u64),reader.read_exact(&mut buf)).await {
-                            Ok(Ok(_)) => {
-                                let len = u64::from_be_bytes(buf) as usize;
-
-                                let mut operation_buf = vec![0u8; len];
-
-                                reader.read_exact(&mut operation_buf).await.unwrap();
-
-                                let (command_buf,payload)=client_controller.Simplify(operation_buf);
-
-
-
-                            }
-
-                            Ok(Err(e)) => {
-                                // Socket/read error
-                                println!("Read error: {}", e);
-                                break;
-                            }
-
-                            Err(_) => {
-                                // Timer expired
-                                println!("Election timeout for {}",client_controller.id);
-                                let mut peer_sockets=client_controller.peer_sockets.write().await;
-
-                                let responses=
-                                for (addr, peer)in peer_sockets.iter_mut(){
-
-                                    let mut buf=Vec::new();
-                                    let mut final_buf=Vec::new();
-
-                                    let command_buf=b"election";
-                                    let len=(buf.len() as u64).to_be_bytes();
-
-                                    final_buf.extend_from_slice(&len);
-                                    final_buf.extend_from_slice(command_buf);
-
-                                    let term_buf=(client_controller.read().term+1).to_be_bytes();
-                                    let len=(term_buf.len() as u64).to_be_bytes();
-
-                                    buf.extend_from_slice(&len);
-                                    buf.extend_from_slice(&term_buf);
-
-
-                                    
-                                    let len=(term_buf.len() as u64).to_be_bytes();
-                                    final_buf.extend_from_slice(&len);
-                                    final_buf.extend_from_slice(&buf);
-
-                                    peer.writer.write_all(&final_buf).await.unwrap();
-                                }
-                                
-
-                                break;
-                            }
-                        }
-
-
-
                         reader.read_exact(&mut buf).await.unwrap();
+                            
+                        signal_for_heartbeat.send(1).await.unwrap();
+                        let len = u64::from_be_bytes(buf) as usize;
 
-                        
+                        let mut command_buf = vec![0u8; len];
+
+                        reader.read_exact(&mut command_buf).await.unwrap();
 
 
+
+
+                        let mut payload_len_buf = [0u8; 8];
+
+                        reader.read_exact(&mut payload_len_buf).await.unwrap();
+
+                        let mut payload = vec![0u8; u64::from_be_bytes(payload_len_buf) as usize];
+
+                        reader.read_exact(&mut payload).await.unwrap();
+
+
+                        client_controller.HandleOperations(command_buf,payload,client_addr).await;
 
                     }
-                    
+
                 });
+           
             }
+
+            
 
         }); 
       
@@ -174,21 +327,27 @@ impl Controller {
         server_setup_recv_sign
         
     }
+
     
-    async fn HandleOperations(&mut self,payload:Vec<u8>){
-        let(opeartion_buf,payload)=self.Simplify(payload);
-        
+    
+    async fn HandleOperations(& self,opeartion_buf:Vec<u8>,payload:Vec<u8>,client_addr:SocketAddr){
+        // println!("{:?}",payload);
+        // println!("received req on controller {} from addr {} adn teh curertn celitns aree {:?}",self.id,client_addr,self.clients);
+        // let(payload,_)=self.Simplify(payload);
+
         match opeartion_buf.as_slice() {
             b"election"=>{
                 let(term_buf,payload)=self.Simplify(payload);
+
                 let (socket_addr_buf,payload)=self.Simplify(payload);
+
                 let term = u64::from_be_bytes(
                     term_buf.as_slice().try_into().unwrap()
                 );
 
                 let mut controller_term=self.term.write().await;
 
-                if term < *controller_term {
+                if term <= *controller_term {
                     // Candidate is using an old term.
                     // Reject the election.
                     let response = b"reject";
@@ -200,18 +359,20 @@ impl Controller {
                     // response
                     buf.extend_from_slice(response);
 
-                    let mut peers=self.peer_sockets.write().await;
-                    let socket=peers.get_mut(&String::from_utf8(socket_addr_buf).unwrap()).unwrap();
-                    socket.writer.write_all(&buf).await;
+                   let clients = self.clients.read().await;
+
+                    
+
+                    let writer = clients.get(&client_addr).unwrap();
+
+                    writer.write().await.write_all(&buf).await.unwrap();
+                    // println!("controller {} voted for the leader {:?}",self.id,buf);
+
                     // write response
                 } 
                 else if term > *controller_term {
-                    // We have learned about a newer term.
                     *controller_term= term;
 
-                    // Become follower / reset vote state
-                    // self.state = State::Follower;
-                    // self.voted_for = None;
 
                     let response = b"accept";
                     let mut buf = Vec::new();
@@ -222,61 +383,70 @@ impl Controller {
                     // response
                     buf.extend_from_slice(response);
 
-                    let mut peers=self.peer_sockets.write().await;
-                    let socket=peers.get_mut(&String::from_utf8(socket_addr_buf).unwrap()).unwrap();
-                    socket.writer.write_all(&buf).await;
+                    let clients = self.clients.read().await;
 
+                    
 
-                    // write response
+                    let writer = clients.get(&client_addr).unwrap();
+
+                    writer.write().await.write_all(&buf).await.unwrap();
+                    // println!("controller {} voted for the leader {:?}",self.id,buf);
+
                 } 
 
             }
 
+            b"leader_elected"=>{
+
+            }
+            b"heartbeat" => {
+                println!("Controller {} received heartbeat", self.id);
+            }
+
+            b"get_broker_id"=>{
+
+            }
             _=>{
 
             }
         }
     }
 
-    fn Simplify(&self,payload: Vec<u8>) -> (Vec<u8>, Vec<u8>) {
-        let op_len = 8;
+    fn Simplify(&self, payload: Vec<u8>) -> (Vec<u8>, Vec<u8>) {
+        let len_buf: [u8; 8] = payload[0..8]
+            .try_into()
+            .unwrap();
 
-        let operation_buf = payload[0..op_len].to_vec();
-        let remaining_buf = payload[op_len..].to_vec();
+        let len = u64::from_be_bytes(len_buf) as usize;
 
-        (operation_buf, remaining_buf)
+        let start = 8;
+        let end = start + len;
+
+        let data = payload[start..end].to_vec();
+        let remaining = payload[end..].to_vec();
+
+        (data, remaining)
     }
 
 
 }
 
 
-async fn CreateControllerSocket(port:u32,ip:SocketAddr)->Result<TcpListener, ConrtollerError>{
-    let port=port.to_string();
-    let port=port.as_str();
-    let addr=ip.to_string();
-    let addr=addr.as_str();
-
-    let addr=format!("{}:{}",addr,port);
-    let socket=TcpListener::bind(addr).await?;
+async fn CreateControllerSocket(ip:SocketAddr)->Result<TcpListener, ConrtollerError>{
+    println!("{}",ip);
+    let socket=TcpListener::bind(ip).await?;
 
     Ok(socket)
 }
 
 
-async fn CreatePeerSockets(peer_config:Controller_Config)->Result<(OwnedReadHalf,OwnedWriteHalf,String,u64),ConrtollerError>{
-    let port=peer_config.port.to_string();
-    let port=port.as_str();
-    let addr=peer_config.ip.to_string();
-    let addr=addr.as_str();
+pub async fn CreatePeerSockets(peer_config:Controller_Config)->Result<(OwnedReadHalf,OwnedWriteHalf,String,u64),ConrtollerError>{
 
-    let addr=format!("{}:{}",addr,port);
-
-    let socket=TcpStream::connect(addr.clone()).await?;
+    let socket=TcpStream::connect(peer_config.ip.clone()).await?;
 
     let (read,write)=socket.into_split();
 
-    Ok((read,write,addr,peer_config.id))
+    Ok((read,write,String::new(),peer_config.id))
 }
 
 
@@ -295,3 +465,65 @@ impl LeaderController{
 
     }
 }
+
+
+
+fn SendHeartBeats(controller: Arc<Controller>) {
+        tokio::spawn(async move {
+            println!("Controller {} became LEADER", controller.id);
+
+            loop {
+                // Check whether we are still leader
+                {
+                    let leader = controller.leader.read().await;
+
+                    if !*leader {
+                        println!("Controller {} is no longer leader", controller.id);
+                        break;
+                    }
+                }
+
+                // Get the current peers
+                let peers: Vec<Arc<peer>> = {
+                    let peer_sockets = controller.peer_sockets.read().await;
+
+                    peer_sockets
+                        .values()
+                        .map(Arc::clone)
+                        .collect()
+                };
+
+                // Send heartbeat to every peer
+                for peer in peers {
+                    let command = b"heartbeat";
+
+                    let mut buf = Vec::new();
+
+                    // command length
+                    buf.extend_from_slice(&(command.len() as u64).to_be_bytes());
+
+                    // command
+                    buf.extend_from_slice(command);
+
+                    // You can add term / leader information here
+                    let term = *controller.term.read().await;
+
+                    let term_buf = term.to_be_bytes();
+
+                    buf.extend_from_slice(&(term_buf.len() as u64).to_be_bytes());
+                    buf.extend_from_slice(&term_buf);
+
+                    if let Err(e) = peer.writer.write().await.write_all(&buf).await {
+                        println!(
+                            "Failed to send heartbeat from controller {}: {}",
+                            controller.id,
+                            e
+                        );
+                    }
+                }
+
+                // Wait before next heartbeat
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        });
+    }
