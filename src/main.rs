@@ -21,15 +21,19 @@ async fn main() {
     println!("Hello, world!");
 
     let a =cluster::Cluster::new();
-
+    let controller_config:cluster::Config;
+    let (leader_elected_signal,reciver)=tokio::sync::oneshot::channel::<u8>();
     match a.ExecuteConfig().await {
         Ok(a)=>{
-
+            controller_config=a;
         }
         Err(e)=>{
-            println!("{}",e)
+            println!("{}",e);
+            return;
         }
     }
+
+    a.ExecuteBrokerConfig(controller_config).await;
 
     loop{
     let mut input = String::new();

@@ -22,7 +22,7 @@ pub struct Controller{
 
     timer:i32,
     pub leader:RwLock<bool>,
-    pub leader_addr:Option<SocketAddr>,
+    pub leader_addr:RwLock<Option<SocketAddr>> ,
     term:RwLock<u64>,
     
     clients:RwLock<HashMap<SocketAddr,Arc<RwLock<OwnedWriteHalf>>>> ,
@@ -82,7 +82,7 @@ impl Controller {
             peer_sockets:RwLock::new(HashMap::new()),
             timer:controller.election_timer,
             leader:RwLock::new(isleader),
-            leader_addr:None,
+            leader_addr:RwLock::new(None) ,
             clients:RwLock::new(HashMap::new()),
             term:RwLock::new(0),
             data:HashMap::new()
@@ -166,6 +166,11 @@ impl Controller {
                             
                             let peers_len=peers.len();
                             let mut responses=Vec::new();
+                            let mut term_guard = controller.term.write().await;
+                            *term_guard += 1;
+
+                            let term=*term_guard;
+                            drop(term_guard);
                             for (addr, peer)in peers.iter_mut(){
 
                                 let mut buf=Vec::new();
@@ -177,7 +182,9 @@ impl Controller {
                                 final_buf.extend_from_slice(&len);
                                 final_buf.extend_from_slice(command_buf);
 
-                                let term_buf=(*controller.term.read().await+1).to_be_bytes();
+                                
+
+                                let term_buf=(term).to_be_bytes();
                                 let len=(term_buf.len() as u64).to_be_bytes();
 
                                 buf.extend_from_slice(&len);
@@ -225,37 +232,38 @@ impl Controller {
                             if accept_count>=peers_len/2 {
                                 let mut leader=controller.leader.write().await;
                                 *leader=true;
+                                
 
                                 //this is to when the leader is elcted to inform the other peers 
-                                // for (addr, peer)in peers.iter_mut(){
-                                //     let mut buf=Vec::new();
-                                //     let mut final_buf=Vec::new();
+                                for (addr, peer)in peers.iter_mut(){
+                                    let mut buf=Vec::new();
+                                    let mut final_buf=Vec::new();
 
-                                //     let command_buf=b"leader_elected";
-                                //     let len=(command_buf.len() as u64).to_be_bytes();
+                                    let command_buf=b"leader_elected";
+                                    let len=(command_buf.len() as u64).to_be_bytes();
 
-                                //     final_buf.extend_from_slice(&len);
-                                //     final_buf.extend_from_slice(command_buf);
+                                    final_buf.extend_from_slice(&len);
+                                    final_buf.extend_from_slice(command_buf);
 
-                                //     let term_buf=(*controller.term.read().await).to_be_bytes();
-                                //     let len=(term_buf.len() as u64).to_be_bytes();
+                                    let term_buf=(*controller.term.read().await).to_be_bytes();
+                                    let len=(term_buf.len() as u64).to_be_bytes();
 
-                                //     buf.extend_from_slice(&len);
-                                //     buf.extend_from_slice(&term_buf);
+                                    buf.extend_from_slice(&len);
+                                    buf.extend_from_slice(&term_buf);
 
 
-                                //     let socket_addr_buf = controller.ip.to_string().into_bytes();
+                                    let socket_addr_buf = controller.ip.to_string().into_bytes();
 
-                                //     buf.extend_from_slice(&(socket_addr_buf.len() as u64).to_be_bytes());
-                                //     buf.extend_from_slice(&socket_addr_buf);
+                                    buf.extend_from_slice(&(socket_addr_buf.len() as u64).to_be_bytes());
+                                    buf.extend_from_slice(&socket_addr_buf);
 
                                     
-                                //     let len=(buf.len() as u64).to_be_bytes();
-                                //     final_buf.extend_from_slice(&len);
-                                //     final_buf.extend_from_slice(&buf);
+                                    let len=(buf.len() as u64).to_be_bytes();
+                                    final_buf.extend_from_slice(&len);
+                                    final_buf.extend_from_slice(&buf);
 
-                                //     peer.writer.write().await.write_all(&final_buf).await.unwrap();
-                                // }
+                                    peer.writer.write().await.write_all(&final_buf).await.unwrap();
+                                }
 
                                 SendHeartBeats(Arc::clone(&controller));
                                 break;
@@ -292,7 +300,10 @@ impl Controller {
                         let mut buf = [0u8; 8];
                         reader.read_exact(&mut buf).await.unwrap();
                             
-                        signal_for_heartbeat.send(1).await.unwrap();
+                        if !*client_controller.leader.read().await {
+                            let _ = signal_for_heartbeat.send(1).await;
+                        }
+
                         let len = u64::from_be_bytes(buf) as usize;
 
                         let mut command_buf = vec![0u8; len];
@@ -397,14 +408,87 @@ impl Controller {
             }
 
             b"leader_elected"=>{
+                    let (term_buf, payload) = self.Simplify(payload);
+                    let (socket_addr_buf, _) = self.Simplify(payload);
 
+                    let term = u64::from_be_bytes(
+                        term_buf.as_slice().try_into().unwrap()
+                    );
+
+                    let leader_addr: SocketAddr = String::from_utf8(socket_addr_buf)
+                        .unwrap()
+                        .parse()
+                        .unwrap();
+
+                    // Update term
+                    {
+                        let mut current_term = self.term.write().await;
+
+                        if term > *current_term {
+                            *current_term = term;
+                        }
+                    }
+
+                    // Save leader address
+                    {
+                        let mut leader_addr_lock = self.leader_addr.write().await;
+                        *leader_addr_lock = Some(leader_addr);
+                    }
+
+                    // This controller is not the leader
+                    {
+                        let mut leader = self.leader.write().await;
+                        *leader = false;
+                    }
+
+                    println!(
+                        "Controller {}: leader elected = {}, term = {}",
+                        self.id,
+                        leader_addr,
+                        term
+                    );
             }
             b"heartbeat" => {
-                println!("Controller {} received heartbeat", self.id);
+                // println!("Controller {} received heartbeat", self.id);
             }
 
-            b"get_broker_id"=>{
+            b"create_topic"=>{
 
+            }
+            b"who_leader" => {
+                let leader = self.leader_addr.read().await;
+
+                let mut response = Vec::new();
+
+                match *leader {
+                    Some(addr) => {
+                        let addr_buf = addr.to_string().into_bytes();
+
+                        // address length
+                        response.extend_from_slice(
+                            &(addr_buf.len() as u64).to_be_bytes()
+                        );
+
+                        // address
+                        response.extend_from_slice(&addr_buf);
+                    }
+
+                    None => {
+                        // address length = 0
+                        response.extend_from_slice(&(0u64).to_be_bytes());
+                    }
+                }
+
+                let clients = self.clients.read().await;
+
+                let writer = clients.get(&client_addr).unwrap();
+
+                writer
+                    .write()
+                    .await
+                    .write_all(&response)
+                    .await
+                    .unwrap();
             }
             _=>{
 

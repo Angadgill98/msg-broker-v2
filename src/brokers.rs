@@ -1,8 +1,8 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
-use tokio::{io::AsyncReadExt, net::{TcpListener, tcp::OwnedWriteHalf}, sync::RwLock};
+use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream, tcp::OwnedWriteHalf}, sync::RwLock};
 
-use crate::server::{self, workers::server_workers};
+use crate::{cluster::{self, Config}, server::{self, workers::server_workers}};
 
 
 
@@ -31,159 +31,251 @@ impl Brokers_config{
 }
 
 
-struct broker{
+pub struct broker{
     server:server::init::server,
     id:u64,
-    ip:SocketAddr
+    pub ip:SocketAddr,
+    pub controllers:HashMap<SocketAddr,TcpStream>,
+    leader_socket_addr:Option<SocketAddr>,
 }
 
 
 impl broker{
-    async fn new(config:&Brokers_config)->Self{
+    pub async fn new(config:&Brokers_config,controller_config:Config)->Self{
         let listner=CreateBrokerSocket(config.ip.clone()).await;
         let shard_count=3;
-
+        let map=broker::CreatePeerConnection(controller_config).await;
         let server=server::init::server::new(shard_count).unwrap();
         Self {  
             server,
             id:config.id,
-            ip:config.ip
+            ip:config.ip,
+            controllers:map,
+            leader_socket_addr:config.leader_socket_addr
         }
     }
 
-    async fn StartBroker(self,socket:TcpListener){
-        let server=Arc::new(RwLock::new(self.server));
-        println!("Server started of Broker of id {}",self.id);
+    pub async fn StartBroker(mut self,socket:TcpListener){
+        
+
+        loop {
+            let mut found_leader = false;
+
+            for (_socket_addr, stream) in self.controllers.iter_mut() {
+                let command = b"who_leader";
+                let len = (command.len() as u64).to_be_bytes();
+
+                let mut buf = Vec::new();
+
+                buf.extend_from_slice(&len);
+                buf.extend_from_slice(command);
+
+                // payload length = 0
+                buf.extend_from_slice(&[0u8; 8]);
+
+                stream.write_all(&buf).await.unwrap();
+
+                let mut len_buf = [0u8; 8];
+
+                if let Err(e) = stream.read_exact(&mut len_buf).await {
+                    eprintln!("Failed to read leader response: {}", e);
+                    continue;
+                }
+
+                let addr_len = u64::from_be_bytes(len_buf) as usize;
+
+                // This controller doesn't know a leader yet
+                if addr_len == 0 {
+                    continue;
+                }
+
+                let mut socket_addr_buf = vec![0u8; addr_len];
+
+                if let Err(e) = stream.read_exact(&mut socket_addr_buf).await {
+                    eprintln!("Failed to read leader address: {}", e);
+                    continue;
+                }
+
+                let socket_addr = match String::from_utf8(socket_addr_buf)
+                    .ok()
+                    .and_then(|s| s.parse::<SocketAddr>().ok())
+                {
+                    Some(addr) => addr,
+                    None => continue,
+                };
+
+                self.leader_socket_addr = Some(socket_addr);
+
+                println!(
+                    "Broker {} found leader at {}",
+                    self.id,
+                    socket_addr
+                );
+
+                found_leader = true;
+                break;
+            }
+
+            if found_leader {
+                break;
+            }
+
+            // No controller knows the leader yet.
+            println!(
+                "Broker {}: no leader yet, retrying...",
+                self.id
+            );
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+        }
 
         tokio::spawn(async move{
-            let (stream,client_addr,) = match socket.accept().await {
-                Ok(connection) =>connection,
+            let broker=self;
+            let server=Arc::new(RwLock::new(broker.server));
+            println!("Server started of Broker of id {}",broker.id);
+            loop {
+                let (stream,client_addr,) = match socket.accept().await {
+                    Ok(connection) =>connection,
 
-                Err(e) => {
-                    eprintln!("Failed to accept connection: {}",e);
+                    Err(e) => {
+                        eprintln!("Failed to accept connection: {}",e);
 
-                    return ;
-                }
-            };
-            println!("Client connected: {}",client_addr);
-
-            let server =Arc::clone(&server);
-
-            tokio::spawn(async move {
-                let (mut reader,writer,) = stream.into_split();
-
-                {
-                    let mut server_guard =server.write().await;
-                    let writer_stream =Arc::new(RwLock::new(writer));
-                    server_guard.clients.insert(client_addr,writer_stream,);
-                }
+                        return ;
+                    }
+                };
+                println!("Client connected: {}",client_addr);
 
                 let server =Arc::clone(&server);
-                let addr=client_addr.to_string();
 
-                'connection: loop {
-                    let mut count_buf =[0u8; 8];
+                tokio::spawn(async move {
+                    let (mut reader,writer,) = stream.into_split();
 
-                    if let Err(e) =reader.read_exact(&mut count_buf).await{
-                        eprintln!("Client {} disconnected: {}",client_addr,e);
-                        break 'connection;
+                    {
+                        let mut server_guard =server.write().await;
+                        let writer_stream =Arc::new(RwLock::new(writer));
+                        server_guard.clients.insert(client_addr,writer_stream,);
                     }
 
-                    let request_count =u64::from_be_bytes(count_buf) as usize;
+                    let server =Arc::clone(&server);
+                    let addr=client_addr.to_string();
 
-                    if request_count == 0 {
-                        eprintln!("Client {} sent empty batch",client_addr);
-                        continue;
-                    }
+                    'connection: loop {
+                        let mut count_buf =[0u8; 8];
 
-                    let mut allreq_buf_len =[0u8; 8];
-
-                    if let Err(e) =reader.read_exact(&mut allreq_buf_len).await{
-                        eprintln!("Failed reading batch length from {}: {}",client_addr,e);
-                        break 'connection;
-                    }
-
-                    let len =u64::from_be_bytes(allreq_buf_len) as usize;
-
-                    let mut all_req_buf =vec![0u8; len];
-
-                    if let Err(e) =reader.read_exact(&mut all_req_buf).await{
-                        eprintln!("Failed reading batch data from {}: {}",client_addr,e);
-                        break 'connection;
-                    }
-
-                    let mut remaining_buf =all_req_buf;
-
-                    for request_index in 0..request_count{
-                        let (request,remaining) = match server_workers::Simplify(remaining_buf) {
-                            Ok(result) =>
-                                result,
-
-                            Err(e) => {
-                                eprintln!("Failed to parse request {} from {}: {}",request_index,client_addr,e);
-                                break 'connection;
-                            }
-                        };
-
-                        remaining_buf =remaining;
-
-                        let (operation,mut payload,) = match server_workers::Simplify(request) {
-                            Ok(result) =>result,
-
-                            Err(e) => {
-                                eprintln!("Failed to parse operation/payload for request {} from {}: {}",request_index,client_addr,e);
-                                break 'connection;
-                            }
-                        };
-
-                        let request_pool = {
-                            let server_guard =server.read().await;
-
-                            server_guard.request_pool.clone()
-                        };
-
-                        // let addr_buf=addr.as_bytes();
-                        // let addr_len=(addr_buf.len() as u64).to_be_bytes();
-
-                        // payload.extend_from_slice(&addr_len);
-                        // payload.extend_from_slice(addr_buf);
-
-                        if let Err(e) =request_pool
-                            .send((
-                                Arc::clone(
-                                    &server
-                                ),
-                                operation,
-                                payload,
-                                client_addr,
-                            ))
-                            .await
-                        {
-                            eprintln!("Failed to queue request from {}: {}",client_addr,e);
-
+                        if let Err(e) =reader.read_exact(&mut count_buf).await{
+                            eprintln!("Client {} disconnected: {}",client_addr,e);
                             break 'connection;
+                        }
+
+                        let request_count =u64::from_be_bytes(count_buf) as usize;
+
+                        if request_count == 0 {
+                            eprintln!("Client {} sent empty batch",client_addr);
+                            continue;
+                        }
+
+                        let mut allreq_buf_len =[0u8; 8];
+
+                        if let Err(e) =reader.read_exact(&mut allreq_buf_len).await{
+                            eprintln!("Failed reading batch length from {}: {}",client_addr,e);
+                            break 'connection;
+                        }
+
+                        let len =u64::from_be_bytes(allreq_buf_len) as usize;
+
+                        let mut all_req_buf =vec![0u8; len];
+
+                        if let Err(e) =reader.read_exact(&mut all_req_buf).await{
+                            eprintln!("Failed reading batch data from {}: {}",client_addr,e);
+                            break 'connection;
+                        }
+
+                        let mut remaining_buf =all_req_buf;
+
+                        for request_index in 0..request_count{
+                            let (request,remaining) = match server_workers::Simplify(remaining_buf) {
+                                Ok(result) =>
+                                    result,
+
+                                Err(e) => {
+                                    eprintln!("Failed to parse request {} from {}: {}",request_index,client_addr,e);
+                                    break 'connection;
+                                }
+                            };
+
+                            remaining_buf =remaining;
+
+                            let (operation,mut payload,) = match server_workers::Simplify(request) {
+                                Ok(result) =>result,
+
+                                Err(e) => {
+                                    eprintln!("Failed to parse operation/payload for request {} from {}: {}",request_index,client_addr,e);
+                                    break 'connection;
+                                }
+                            };
+
+                            let request_pool = {
+                                let server_guard =server.read().await;
+
+                                server_guard.request_pool.clone()
+                            };
+
+                            // let addr_buf=addr.as_bytes();
+                            // let addr_len=(addr_buf.len() as u64).to_be_bytes();
+
+                            // payload.extend_from_slice(&addr_len);
+                            // payload.extend_from_slice(addr_buf);
+
+                            if let Err(e) =request_pool
+                                .send((
+                                    Arc::clone(
+                                        &server
+                                    ),
+                                    operation,
+                                    payload,
+                                    client_addr,
+                                ))
+                                .await
+                            {
+                                eprintln!("Failed to queue request from {}: {}",client_addr,e);
+
+                                break 'connection;
+                            }
+                        }
+
+                        if !remaining_buf.is_empty() {
+                            eprintln!("Batch from {} contained {} unconsumed bytes",client_addr,remaining_buf.len());
                         }
                     }
 
-                    if !remaining_buf.is_empty() {
-                        eprintln!("Batch from {} contained {} unconsumed bytes",client_addr,remaining_buf.len());
+                    {
+                        let mut server_guard =server.write().await;
+
+                        server_guard.clients.remove(&client_addr);
                     }
-                }
 
-                {
-                    let mut server_guard =server.write().await;
-
-                    server_guard.clients.remove(&client_addr);
-                }
-
-                println!("Client {} connection handler stopped",client_addr);
-            });
+                    println!("Client {} connection handler stopped",client_addr);
+                });
+            }
+            
         });
             
     }
+
+    pub async fn CreatePeerConnection(configs:cluster::Config)->HashMap<SocketAddr,TcpStream>{
+        let mut map=HashMap::new();
+
+        for config in configs.0.iter(){
+            let socket=TcpStream::connect(config.ip.clone()).await.unwrap();
+            map.insert(config.ip, socket);
+        }
+
+        return map;
+    }
 }
 
-async fn CreateBrokerSocket(ip:SocketAddr)->TcpListener{
+pub async fn CreateBrokerSocket(ip:SocketAddr)->TcpListener{
     let sokcet=TcpListener::bind(ip).await.unwrap();
     sokcet
 }
+

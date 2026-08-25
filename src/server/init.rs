@@ -70,7 +70,8 @@ impl server {
             consumer_grp:Arc::new(RwLock::new(consumer::Consumergrp{
                 grp:HashMap::new(),
                 consumers:HashMap::new()
-            }))
+            })),
+            
         })
     }
 

@@ -74,7 +74,7 @@ impl Cluster {
         }
     }
 
-    pub async fn ExecuteConfig(&self)->Result<(),ConrtollerError>{
+    pub async fn ExecuteConfig(&self)->Result<Config,ConrtollerError>{
         let controllers_config=self.config.clone();
         let mut isleader=false;
 
@@ -104,47 +104,23 @@ impl Cluster {
 
             start_next.await.unwrap();
         }
-
-
-        // for controller in &controllers{
-        //     for peer in controller.peers_config.clone(){
-        //         if peer.id == controller.id {
-        //             continue;
-        //         }
-        //         let (reader,writer,addr,controller_id)= match controller::CreatePeerSockets(peer.clone()).await{
-        //             Ok(a)=>{
-        //                 println!("Staeted the peer socket for teh controller with args {:?} \nand teh peer socket config is {:?}",controller,peer);
-        //                 Ok(a)
-        //             }
-        //             Err(e)=>{
-        //                 println!("Faile to create peer socket for teh controller with args {:?} \nand teh peer socket config is {:?}",controller,peer);
-        //                 Err(e)
-        //             }
-        //         }?;
-                
-        //         controller.peer_sockets.write().await.insert(
-        //             peer.ip,
-        //             controller::peer {
-        //                 reader,
-        //                 writer,
-        //                 id:peer.id,
-        //             },
-        //         );
-        //     }
-        // }
+ 
 
         for singal in signals{
             singal.send(1).unwrap();
         }
 
-        Ok(())
+        Ok(controllers_config)
 
     }
 
 
-    pub async fn ExecuteBrokerConfig(&self){
-        for broker in &self.brokers_config{
-            
+    
+    pub async fn ExecuteBrokerConfig(&self,controller_config:Config){
+        for broker_config in &self.brokers_config{
+            let broker=brokers::broker::new(broker_config,controller_config.clone()).await;
+            let socket=brokers::CreateBrokerSocket(broker.ip).await;
+            let a=broker.StartBroker(socket).await;
         }
     }
 }
