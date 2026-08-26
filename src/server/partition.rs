@@ -36,7 +36,7 @@ impl Partition {
 
 
 
-pub fn CreatePartitions(topic_name: &[u8],partition_no: usize,) -> Result<HashMap<usize, Arc<RwLock<Partition>>>,Box<dyn Error + Send + Sync>,>{
+pub fn CreatePartitions(topic_name: &[u8],partition_no: usize,broker_id:u64) -> Result<HashMap<usize, Arc<RwLock<Partition>>>,Box<dyn Error + Send + Sync>,>{
     let topic_name =
         String::from_utf8(topic_name.to_vec())
             .map_err(|e| {
@@ -58,7 +58,8 @@ pub fn CreatePartitions(topic_name: &[u8],partition_no: usize,) -> Result<HashMa
     for i in 0..partition_no {
         let file_name =
             format!(
-                "{}_partition_{}.log",
+                "broker_{}_{}_partition_{}.log",
+                broker_id,
                 topic_name,
                 i
             );

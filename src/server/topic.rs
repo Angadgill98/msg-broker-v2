@@ -36,8 +36,8 @@ pub struct topic {
 }
 
 impl topic {
-    pub fn new(topic_name: &Vec<u8>,partition_no: usize) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        let partitions =partition::CreatePartitions(topic_name, partition_no)?;
+    pub fn new(topic_name: &Vec<u8>,partition_no: usize,broker_id:u64) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        let partitions =partition::CreatePartitions(topic_name, partition_no,broker_id)?;
 
         Ok(Self {
             partition_no,

@@ -1020,8 +1020,11 @@ impl client{
         dispatcher
     }
 
-    pub async fn get_leader_stream(&mut self,) -> Result<(), Box<dyn Error>> {
+    async fn get_leader_stream(&mut self,) -> Result<(), Box<dyn Error>> {
 
+        if let Some(_) = &self.leader_stream {
+            return Ok(());
+        }
         loop {
             // Try every broker we currently know.
             for (_broker_addr, broker_stream) in self.brokers_stream.iter_mut() {
@@ -1142,6 +1145,67 @@ impl client{
                 tokio::time::Duration::from_millis(1000)
             ).await;
         }
+    }
+
+
+
+
+
+    pub async fn insert_topic(&mut self,topic_name: String,partition_no: u64) -> Result<(), Box<dyn Error>> {
+        
+        match self.get_leader_stream().await {
+            Ok(a)=>{
+
+            }
+            Err(e)=>{
+                println!("Client:Failed to get leader while inserting topic  {}",e);
+                return Ok(()) ;
+            }
+
+        }
+
+        
+        let mut final_buf = Vec::new();
+        let mut buf = Vec::new();
+
+        
+
+
+        let op = "create_topic".as_bytes();
+        let op_len = (op.len() as u64).to_be_bytes();
+
+        final_buf.extend_from_slice(&op_len);
+        final_buf.extend_from_slice(&op);
+
+
+        let topic_buf = topic_name.as_bytes();
+        let topic_len = (topic_buf.len() as u64).to_be_bytes();
+
+        let partition_buf = partition_no.to_be_bytes();
+        let partition_len=(partition_buf.len() as u64).to_be_bytes();
+        buf.extend_from_slice(&topic_len);
+        buf.extend_from_slice(topic_buf);
+
+        buf.extend_from_slice(&partition_len);
+        buf.extend_from_slice(&partition_buf);
+
+        let buf_len = (buf.len() as u64).to_be_bytes();
+
+
+        final_buf.extend_from_slice(&buf_len);
+        final_buf.extend_from_slice(&buf);
+
+        if let Some(stream)=&mut self.leader_stream{
+            stream.write_all(&final_buf).await.unwrap();
+            let mut len_buf=[0u8;8];
+            // stream.read_exact(&mut len_buf).await.unwrap();
+
+
+
+
+        }
+
+        Ok(())
     }
 
 

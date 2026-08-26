@@ -41,19 +41,19 @@ impl Cluster {
 
         let controllers = vec![
             Controller_Config::new(
-                1,
+                0,
                 9093,
                 "127.0.0.1:9093".parse().unwrap(),
                 rng.random_range(150..=300)
             ),
             Controller_Config::new(
-                2,
+                1,
                 9094,
                 "127.0.0.1:9094".parse().unwrap(),
                 rng.random_range(150..=300)
             ),
             Controller_Config::new(
-                3,
+                2,
                 9095,
                 "127.0.0.1:9095".parse().unwrap(),
                 rng.random_range(150..=300)
@@ -62,9 +62,9 @@ impl Cluster {
 
 
         let brokers_config = vec![
-            brokers::Brokers_config::new(1, "127.0.0.1:10001".parse().unwrap()),
-            brokers::Brokers_config::new(2, "127.0.0.1:10002".parse().unwrap()),
-            brokers::Brokers_config::new(3, "127.0.0.1:10003".parse().unwrap()),
+            brokers::Brokers_config::new(0, "127.0.0.1:10001".parse().unwrap()),
+            brokers::Brokers_config::new(1, "127.0.0.1:10002".parse().unwrap()),
+            brokers::Brokers_config::new(2, "127.0.0.1:10003".parse().unwrap()),
         ];
 
 
@@ -85,8 +85,8 @@ impl Cluster {
             
             let mut peer_config=controllers_config.clone().0;
             peer_config.remove(index);
-
-            let controller=controller::Controller::new(controller.clone(),peer_config,isleader).await?;
+            
+            let controller=controller::Controller::new(controller.clone(),peer_config,isleader,self.brokers_config.len() as u64).await?;
             controllers.push(controller);
 
 

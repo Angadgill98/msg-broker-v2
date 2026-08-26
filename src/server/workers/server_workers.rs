@@ -168,7 +168,6 @@ fn InitWorkers(worker_count: usize) -> mpsc::Sender<WorkerRequest> {
                                 let server_guard =server.read().await;
                                 server_guard.response_pool.clone()
                             };
-                            println!("asdasdas");
 
                             if let Err(e) =
                                 response_writer_signal
@@ -297,22 +296,26 @@ enum OperationResult {
 async fn HandleOperation(server: &Arc<RwLock<server::init::server>>,operation: Vec<u8>,payload: Vec<u8>) -> Result<Option<OperationResult>,Box<dyn std::error::Error + Send + Sync>,> {
     let operation =String::from_utf8(operation)
             .map_err(|e| { format!("Invalid operation UTF-8: {}",e)})?;
-    // println!("SErver: opeartio si {}",operation);
+    // println!("SErver: opeartio si {} adn paylaod is {:?}",operation,payload);
     match operation.trim() {
         "topic_insert" => {
+
+            // println!("Broker/Server: payload is {:?}",payload);
             let (topic_name_buf,payload,) = Simplify(payload)?;
 
-            if payload.len() != 8 {
-                return Err(
-                    format!("Invalid partition count payload: expected 8 bytes, got {}",payload.len())
-                    .into()
-                );
-            }
+            
 
-            let partition_no =u64::from_be_bytes(
-                payload.try_into().map_err(|_| {"Failed to parse partition count"})?,
-            ) as usize;
+            let (partition_buf,payload) = Simplify(payload)?;
 
+            let partition_no = u64::from_be_bytes(partition_buf.try_into().map_err(|_| "Failed to parse partition count")?,) as usize;
+
+            let (broker_id_buf, _) = Simplify(payload)?;
+
+            let broker_id = u64::from_be_bytes(
+                broker_id_buf
+                    .try_into()
+                    .map_err(|_| "Invalid broker ID")?
+            );
             if partition_no == 0 {
                 return Err("Partition count cannot be zero".into());
             }
@@ -332,9 +335,10 @@ async fn HandleOperation(server: &Arc<RwLock<server::init::server>>,operation: V
 
             let mut topic_map_guard =topic_map.write().await;
 
-            let topic =topic::topic::new(&topic_name_buf,partition_no,)?;
+            let topic =topic::topic::new(&topic_name_buf,partition_no,broker_id)?;
 
             topic_map_guard.insert(topic_name_buf,topic,);
+
 
             Ok(None)
         }

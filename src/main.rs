@@ -44,17 +44,16 @@ async fn main() {
     //     }
     // };
 
-    // if let Err(e) =
-    //     client::cli::Cli::init(&mut client).await
-    // {
-    //     eprintln!("CLI error: {}", e);
-    // }
+    
 
 
 
     let mut client=client::init::client::new(brokers_config).await;
+    if let Err(e) =client::cli::Cli::init(&mut client).await{
+        eprintln!("CLI error: {}", e);
+    }
 
-    client.get_leader_stream().await.unwrap();
+    // client.get_leader_stream().await.unwrap();
 
     loop{
     let mut input = String::new();

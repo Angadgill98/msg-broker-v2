@@ -1,6 +1,6 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream, tcp::OwnedWriteHalf}, sync::RwLock};
+use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream, tcp::{OwnedReadHalf, OwnedWriteHalf}}, sync::RwLock};
 
 use crate::{cluster::{self, Config}, server::{self, workers::server_workers}};
 
@@ -131,6 +131,53 @@ impl broker{
             tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
         }
 
+       
+
+       let leader_controller_stream={
+            let leader_addr=self.leader_socket_addr.unwrap();
+            let stream=self.controllers.get_mut(&leader_addr).unwrap();
+            stream
+       };
+
+       {
+        let mut buf=Vec::new();
+        let mut final_buf=Vec::new();
+
+        let command_buf=b"i_am_broker";
+        let command_len=(command_buf.len() as u64).to_be_bytes();
+
+        final_buf.extend_from_slice(&command_len);
+        final_buf.extend_from_slice(command_buf);
+
+
+
+        let broker_socket_ip=self.ip.to_string().as_bytes().to_vec();
+        let len=(broker_socket_ip.len() as u64).to_be_bytes();
+
+        buf.extend_from_slice(&len);
+        buf.extend_from_slice(&broker_socket_ip);
+
+
+        let broker_id=self.id.to_be_bytes();
+        let id_len=(broker_id.len() as u64).to_be_bytes();
+
+        buf.extend_from_slice(&id_len);
+        buf.extend_from_slice(&broker_id);
+
+
+        let len=(buf.len() as u64).to_be_bytes();
+        final_buf.extend_from_slice(&len);
+        final_buf.extend_from_slice(&buf);
+
+
+
+        leader_controller_stream.write_all(&final_buf).await.unwrap();
+
+       }
+
+
+
+
         tokio::spawn(async move{
             
             let broker=self;
@@ -169,6 +216,7 @@ impl broker{
                             eprintln!("Client {} disconnected: {}",client_addr,e);
                             break 'connection;
                         }
+
 
                         let request_count =u64::from_be_bytes(count_buf) as usize;
 
@@ -318,6 +366,12 @@ impl broker{
 
         return map;
     }
+
+    fn ConnectToLeader(addr:SocketAddr){
+
+    }
+
+  
 }
 
 pub async fn CreateBrokerSocket(ip:SocketAddr)->TcpListener{
