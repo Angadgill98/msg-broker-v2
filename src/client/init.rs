@@ -684,7 +684,7 @@ use crate::brokers;
 
 
 pub struct client {
-    metadata: HashMap<String, SocketAddr>,
+    metadata: HashMap<String, HashMap<u64, (SocketAddr, u64)>>,
 
     brokers_stream:HashMap<SocketAddr,mpsc::Sender<(Vec<u8>, Option<oneshot::Sender<Vec<u8>>>)>>,
 
@@ -1147,10 +1147,6 @@ impl client{
         }
     }
 
-
-
-
-
     pub async fn insert_topic(&mut self,topic_name: String,partition_no: u64) -> Result<(), Box<dyn Error>> {
         
         match self.get_leader_stream().await {
@@ -1195,14 +1191,48 @@ impl client{
         final_buf.extend_from_slice(&buf_len);
         final_buf.extend_from_slice(&buf);
 
-        if let Some(stream)=&mut self.leader_stream{
+        if let Some(stream) = &mut self.leader_stream {
+            // Send request
             stream.write_all(&final_buf).await.unwrap();
-            let mut len_buf=[0u8;8];
-            // stream.read_exact(&mut len_buf).await.unwrap();
+
+            // ------------------------------------
+            // Read JSON length
+            // ------------------------------------
+
+            let mut len_buf = [0u8; 8];
+
+            stream
+                .read_exact(&mut len_buf)
+                .await
+                .unwrap();
+
+            let buf_len = u64::from_be_bytes(len_buf) as usize;
+
+            // ------------------------------------
+            // Read JSON data
+            // ------------------------------------
+
+            let mut buf = vec![0u8; buf_len];
+
+            stream
+                .read_exact(&mut buf)
+                .await
+                .unwrap();
+
+            // ------------------------------------
+            // Deserialize partition mapping
+            // ------------------------------------
+
+            let partition_mapping:
+                std::collections::HashMap<u64, (std::net::SocketAddr, u64)> =
+                serde_json::from_slice(&buf)
+                    .map_err(|e| format!("Failed to deserialize partition mapping: {}", e))
+                    .unwrap();
+
+            // println!("Partition mapping: {:?}", partition_mapping);
 
 
-
-
+            self.metadata.insert(topic_name, partition_mapping);
         }
 
         Ok(())

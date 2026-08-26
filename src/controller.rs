@@ -37,6 +37,14 @@ pub struct Controller{
 }
 
 
+use serde::{Deserialize, Serialize};
+#[derive(Serialize, Deserialize, Debug)]
+struct PartitionMapping {
+    global_partition: u64,
+    broker_addr: SocketAddr,
+    local_partition: u64,
+}
+
 
 #[derive(Debug)]
 
@@ -489,141 +497,182 @@ impl Controller {
                         .expect("partition number must be 8 bytes")
                 );
 
-                let mut broker_requests: HashMap<usize, Vec<Vec<u8>>> =HashMap::new();
+                let mut broker_requests: HashMap<usize, Vec<Vec<u8>>> = HashMap::new();
 
-
-                // --------------------------------------------------
-                // Create request for every partition
-                // --------------------------------------------------
-
-            
                 let total_partitions = partition_no;
                 let broker_count = self.broker_no;
 
                 let base = total_partitions / broker_count;
                 let remainder = total_partitions % broker_count;
-                
-                
-                let mut partition_mapping: HashMap<u64, (u64, u64)> = HashMap::new();
+
+                // Global partition -> (broker address, local partition)
+                let mut partition_mapping: HashMap<u64, (SocketAddr, u64)> =
+                    HashMap::new();
+
+                let mut global_partition_id = 0u64;
+
                 for broker_index in 0..broker_count {
 
-                    let total_partitions = partition_no;
-                    let broker_count = self.broker_no;
+                    // -----------------------------------------
+                    // Number of partitions this broker owns
+                    // -----------------------------------------
 
-                    let base = total_partitions / broker_count;
-                    let remainder = total_partitions % broker_count;
+                    let local_partition_count =
+                        base + if broker_index < remainder { 1 } else { 0 };
 
-                    let mut global_partition_id = 0u64;
-
-                    for broker_index in 0..broker_count {
-
-                        let local_partition_count =
-                            base + if broker_index < remainder { 1 } else { 0 };
-
-                        if local_partition_count == 0 {
-                            continue;
-                        }
-
-                        let broker_id = broker_index as u64;
-
-                        // -----------------------------------------
-                        // GLOBAL -> BROKER -> LOCAL mapping
-                        // -----------------------------------------
-
-                        for local_partition_id in 0..local_partition_count {
-
-                            partition_mapping.insert(
-                                global_partition_id,
-                                (
-                                    broker_id,
-                                    local_partition_id as u64,
-                                ),
-                            );
-
-                            global_partition_id += 1;
-                        }
-
-                        // -----------------------------------------
-                        // Now construct request for this broker
-                        // -----------------------------------------
-
-                        let broker_id_buf = broker_id.to_be_bytes();
-                        let broker_id_len = (8u64).to_be_bytes();
-
-                        let req_id = broker_id as i64;
-                        let req_id_buf = req_id.to_be_bytes();
-                        let req_id_len = (8u64).to_be_bytes();
-
-                        let operation_buf = b"topic_insert";
-                        let operation_len =
-                            (operation_buf.len() as u64).to_be_bytes();
-
-                        // -----------------------------------------
-                        // PAYLOAD
-                        //
-                        // [topic_len][topic]
-                        // [local_partition_count_len][local_partition_count]
-                        // [broker_id_len][broker_id]
-                        //
-                        // This is what broker receives.
-                        // -----------------------------------------
-
-                        let topic_len =
-                            (topic_buf.len() as u64).to_be_bytes();
-
-                        let partition_count_buf =
-                            (local_partition_count as u64).to_be_bytes();
-
-                        let partition_count_len = (8u64).to_be_bytes();
-
-                        let mut payload_buf = Vec::new();
-
-                        payload_buf.extend_from_slice(&topic_len);
-                        payload_buf.extend_from_slice(&topic_buf);
-
-                        payload_buf.extend_from_slice(&partition_count_len);
-                        payload_buf.extend_from_slice(&partition_count_buf);
-
-                        payload_buf.extend_from_slice(&broker_id_len);
-                        payload_buf.extend_from_slice(&broker_id_buf);
-
-                        // -----------------------------------------
-                        // REQUEST
-                        // -----------------------------------------
-
-                        let payload_len =
-                            (payload_buf.len() as u64).to_be_bytes();
-
-                        let mut req = Vec::new();
-
-                        req.extend_from_slice(&req_id_len);
-                        req.extend_from_slice(&req_id_buf);
-
-                        req.extend_from_slice(&operation_len);
-                        req.extend_from_slice(operation_buf);
-
-                        req.extend_from_slice(&payload_len);
-                        req.extend_from_slice(&payload_buf);
-
-                        broker_requests
-                            .entry(broker_index as usize)
-                            .or_default()
-                            .push(req);
+                    if local_partition_count == 0 {
+                        continue;
                     }
+
+                    // -----------------------------------------
+                    // Broker ID
+                    // -----------------------------------------
+
+                    let broker_id = broker_index as u64;
+
+                    // -----------------------------------------
+                    // Get actual broker address
+                    // broker_id -> SocketAddr
+                    // -----------------------------------------
+
+                    let broker_addr = {
+                        let broker_ids = self.broker_ids.read().await;
+
+                        match broker_ids.get(&broker_id) {
+                            Some(addr) => *addr,
+                            None => {
+                                eprintln!(
+                                    "Broker ID {} not found",
+                                    broker_id
+                                );
+                                continue;
+                            }
+                        }
+                    };
+
+                    // -----------------------------------------
+                    // GLOBAL -> BROKER IP -> LOCAL
+                    // -----------------------------------------
+
+                    for local_partition_id in 0..local_partition_count {
+
+                        partition_mapping.insert(
+                            global_partition_id,
+                            (
+                                broker_addr,
+                                local_partition_id as u64,
+                            ),
+                        );
+
+                        global_partition_id += 1;
+                    }
+
+                    // -----------------------------------------
+                    // Request ID
+                    // -----------------------------------------
+
+                    let req_id = broker_id as i64;
+                    let req_id_buf = req_id.to_be_bytes();
+                    let req_id_len = (8u64).to_be_bytes();
+
+                    // -----------------------------------------
+                    // Operation
+                    // -----------------------------------------
+
+                    let operation_buf = b"topic_insert";
+
+                    let operation_len =
+                        (operation_buf.len() as u64).to_be_bytes();
+
+                    // -----------------------------------------
+                    // PAYLOAD
+                    //
+                    // [topic_len][topic]
+                    // [partition_count_len][local_partition_count]
+                    // [broker_id_len][broker_id]
+                    //
+                    // -----------------------------------------
+
+                    let topic_len =
+                        (topic_buf.len() as u64).to_be_bytes();
+
+                    let partition_count_buf =
+                        (local_partition_count as u64).to_be_bytes();
+
+                    let partition_count_len =
+                        (8u64).to_be_bytes();
+
+                    let broker_id_buf =
+                        broker_id.to_be_bytes();
+
+                    let broker_id_len =
+                        (8u64).to_be_bytes();
+
+                    let mut payload_buf = Vec::new();
+
+                    // topic
+                    payload_buf.extend_from_slice(&topic_len);
+                    payload_buf.extend_from_slice(&topic_buf);
+
+                    // LOCAL partition count
+                    payload_buf.extend_from_slice(&partition_count_len);
+                    payload_buf.extend_from_slice(&partition_count_buf);
+
+                    // broker ID
+                    payload_buf.extend_from_slice(&broker_id_len);
+                    payload_buf.extend_from_slice(&broker_id_buf);
+
+                    // -----------------------------------------
+                    // REQUEST
+                    //
+                    // [req_id_len][req_id]
+                    // [operation_len][operation]
+                    // [payload_len][payload]
+                    // -----------------------------------------
+
+                    let payload_len =
+                        (payload_buf.len() as u64).to_be_bytes();
+
+                    let mut req = Vec::new();
+
+                    req.extend_from_slice(&req_id_len);
+                    req.extend_from_slice(&req_id_buf);
+
+                    req.extend_from_slice(&operation_len);
+                    req.extend_from_slice(operation_buf);
+
+                    req.extend_from_slice(&payload_len);
+                    req.extend_from_slice(&payload_buf);
+
+                    broker_requests
+                        .entry(broker_index as usize)
+                        .or_default()
+                        .push(req);
                 }
+
+
                 // --------------------------------------------------
-                // Now create BATCH for every broker
+                // Global partition mapping
                 // --------------------------------------------------
-                println!("Gloabal mapping for partiotn is   {:?}",partition_mapping);
+
+                // println!(
+                //     "Global partition mapping: {:?}",
+                //     partition_mapping
+                // );
+
+
+                // --------------------------------------------------
+                // Create BATCH for every broker
+                // --------------------------------------------------
+
                 for (broker_index, requests) in broker_requests {
 
-                    // Number of requests in THIS broker's batch
                     let request_count =
                         requests.len() as u64;
 
-                    // --------------------------------------------------
-                    // Combine all requests
-                    // --------------------------------------------------
+                    // -----------------------------------------
+                    // Combine requests
+                    // -----------------------------------------
 
                     let mut requests_buf = Vec::new();
 
@@ -631,87 +680,115 @@ impl Controller {
                         requests_buf.extend_from_slice(&req);
                     }
 
-                    // Length of all requests
                     let batch_length =
                         requests_buf.len() as u64;
 
-
-                    // --------------------------------------------------
-                    // Build BATCH
+                    // -----------------------------------------
+                    // BATCH
                     //
-                    // [8] request_count
-                    // [8] batch_length
+                    // [request_count]
+                    // [batch_length]
                     // [requests]
-                    // --------------------------------------------------
+                    // -----------------------------------------
 
                     let mut batch =
                         Vec::with_capacity(
                             16 + requests_buf.len()
                         );
 
-                    // [request_count]
                     batch.extend_from_slice(
                         &request_count.to_be_bytes()
                     );
 
-                    // [batch_length]
                     batch.extend_from_slice(
                         &batch_length.to_be_bytes()
                     );
 
-                    // [requests]
                     batch.extend_from_slice(
                         &requests_buf
                     );
 
-
-                    // println!(
-                    //     "Broker {} batch: {:?}",
-                    //     broker_index,
-                    //     batch
-                    // );
+                    // -----------------------------------------
+                    // broker_index -> broker_id/address
+                    // -----------------------------------------
 
                     let broker_id = broker_index as u64;
 
-                    let broker_id = {
-                        let broker_ids = self.broker_ids.read().await;
+                    let broker_addr = {
+                        let broker_ids =
+                            self.broker_ids.read().await;
 
                         match broker_ids.get(&broker_id) {
-                            Some(id) => *id,
+                            Some(addr) => *addr,
                             None => {
-                                eprintln!("Broker index {} not found", broker_index);
+                                eprintln!(
+                                    "Broker ID {} not found",
+                                    broker_id
+                                );
                                 continue;
                             }
                         }
                     };
-                    
-                    let mut broker_sockets = self.broker_sockets.write().await;
 
-                    let stream = match broker_sockets.get_mut(&broker_id) {
-                        Some(stream) => stream,
-                        None => {
-                            eprintln!(
-                                "Socket for broker {} not found",
-                                broker_id
-                            );
-                            continue;
-                        }
-                    };
+                    // -----------------------------------------
+                    // Get socket
+                    // -----------------------------------------
 
-                    if let Err(e) = stream.write_all(&batch).await {
+                    let mut broker_sockets =
+                        self.broker_sockets.write().await;
+
+                    let stream =
+                        match broker_sockets.get_mut(&broker_addr) {
+                            Some(stream) => stream,
+
+                            None => {
+                                eprintln!(
+                                    "Socket for broker {} at {} not found",
+                                    broker_id,
+                                    broker_addr
+                                );
+                                continue;
+                            }
+                        };
+
+                    // -----------------------------------------
+                    // Send batch
+                    // -----------------------------------------
+
+                    if let Err(e) =
+                        stream.write_all(&batch).await
+                    {
                         eprintln!(
                             "Failed to send batch to broker {}: {}",
-                            broker_id, e
+                            broker_id,
+                            e
                         );
                     }
-
-
-                    // Send `batch` to broker_index here
                 }
 
 
 
+                let writer={
+                    let a =self.clients.read().await;
+                    let b=a.get(&client_addr).unwrap();
+                    Arc::clone(&b)
+                    
+                };
+                let buf = serde_json::to_vec(&partition_mapping)
+                    .map_err(|e| format!("Failed to serialize partition mapping: {}", e)).unwrap();
 
+                let mut message = Vec::new();
+
+                // [8 bytes: JSON length]
+                message.extend_from_slice(
+                    &(buf.len() as u64).to_be_bytes()
+                );
+
+                // [JSON data]
+                message.extend_from_slice(&buf);
+
+
+                writer.write().await.write_all(&message).await.unwrap();
 
             }
            
