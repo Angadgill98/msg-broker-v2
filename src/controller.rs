@@ -140,7 +140,7 @@ impl Controller {
                         signal = receiver.recv() => {
                             match signal {
                                 Some(_) => {
-                                    println!("Reset election timer");
+                                    // println!("Reset election timer");
                                     continue;
                                 }
 
