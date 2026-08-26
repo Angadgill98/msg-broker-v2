@@ -33,7 +33,28 @@ async fn main() {
         }
     }
 
-    a.ExecuteBrokerConfig(controller_config).await;
+    let brokers_config=a.ExecuteBrokerConfig(controller_config).await;
+
+    // // Now server is ready
+    // let mut client = match client::init::client::init(brokers_config).await {
+    //     Ok(client) => client,
+    //     Err(e) => {
+    //         eprintln!("Failed to create client: {}", e);
+    //         return;
+    //     }
+    // };
+
+    // if let Err(e) =
+    //     client::cli::Cli::init(&mut client).await
+    // {
+    //     eprintln!("CLI error: {}", e);
+    // }
+
+
+
+    let mut client=client::init::client::new(brokers_config).await;
+
+    client.get_leader_stream().await.unwrap();
 
     loop{
     let mut input = String::new();

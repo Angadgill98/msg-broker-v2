@@ -7,10 +7,10 @@ use crate::{cluster::{self, Config}, server::{self, workers::server_workers}};
 
 
 
-
+#[derive(Clone)]
 pub struct Brokers_config{
     id:u64,
-    ip:SocketAddr,
+    pub ip:SocketAddr,
     leader_socket_addr:Option<SocketAddr>,
 
 }
@@ -45,7 +45,7 @@ impl broker{
         let listner=CreateBrokerSocket(config.ip.clone()).await;
         let shard_count=3;
         let map=broker::CreatePeerConnection(controller_config).await;
-        let server=server::init::server::new(shard_count).unwrap();
+        let server=server::init::server::new(shard_count,config.leader_socket_addr.clone()).unwrap();
         Self {  
             server,
             id:config.id,
@@ -113,6 +113,8 @@ impl broker{
                 );
 
                 found_leader = true;
+
+                self.server.leader_socket_addr=Some(socket_addr);
                 break;
             }
 
@@ -130,6 +132,7 @@ impl broker{
         }
 
         tokio::spawn(async move{
+            
             let broker=self;
             let server=Arc::new(RwLock::new(broker.server));
             println!("Server started of Broker of id {}",broker.id);
@@ -192,8 +195,49 @@ impl broker{
 
                         let mut remaining_buf =all_req_buf;
 
+                        // println!("Server:All req buf is {:?}",remaining_buf);
+
                         for request_index in 0..request_count{
-                            let (request,remaining) = match server_workers::Simplify(remaining_buf) {
+                            // -----------------------------------------
+                            // Parse request ID
+                            // -----------------------------------------
+
+                            let (req_id_buf, remaining) =
+                                match server_workers::Simplify(remaining_buf) {
+                                    Ok(result) => result,
+
+                                    Err(e) => {
+                                        eprintln!(
+                                            "Failed to parse request ID {} from {}: {}",
+                                            request_index,
+                                            client_addr,
+                                            e
+                                        );
+                                        break 'connection;
+                                    }
+                                };
+
+                            remaining_buf = remaining;
+
+                            let req_id = match req_id_buf.len() {
+                                8 => {
+                                    let mut id_buf = [0u8; 8];
+                                    id_buf.copy_from_slice(&req_id_buf);
+
+                                    i64::from_be_bytes(id_buf)
+                                }
+
+                                _ => {
+                                    eprintln!(
+                                        "Invalid request ID length {} from {}",
+                                        req_id_buf.len(),
+                                        client_addr
+                                    );
+                                    break 'connection;
+                                }
+                            };
+
+                            let (operation,remaining) = match server_workers::Simplify(remaining_buf) {
                                 Ok(result) =>
                                     result,
 
@@ -203,9 +247,8 @@ impl broker{
                                 }
                             };
 
-                            remaining_buf =remaining;
-
-                            let (operation,mut payload,) = match server_workers::Simplify(request) {
+                            // println!("Server:operation buf is {:?}",operation);
+                            let (payload,remaining,) = match server_workers::Simplify(remaining) {
                                 Ok(result) =>result,
 
                                 Err(e) => {
@@ -213,6 +256,8 @@ impl broker{
                                     break 'connection;
                                 }
                             };
+                            remaining_buf =remaining.clone();
+
 
                             let request_pool = {
                                 let server_guard =server.read().await;
@@ -234,6 +279,7 @@ impl broker{
                                     operation,
                                     payload,
                                     client_addr,
+                                    req_id
                                 ))
                                 .await
                             {
@@ -243,9 +289,9 @@ impl broker{
                             }
                         }
 
-                        if !remaining_buf.is_empty() {
-                            eprintln!("Batch from {} contained {} unconsumed bytes",client_addr,remaining_buf.len());
-                        }
+                        // if !remaining_buf.is_empty() {
+                        //     eprintln!("Batch from {} contained {} unconsumed bytes",client_addr,remaining_buf.len());
+                        // }
                     }
 
                     {

@@ -4,13 +4,13 @@ use tokio::sync::{RwLock, mpsc, oneshot};
 
 use crate::server::{self, partition, topic, workers::consumer_worker};
 
-pub fn RequestPool() -> mpsc::Sender<(Arc<RwLock<server::init::server>>,Vec<u8>,Vec<u8>,SocketAddr)> {
-    let (sender, mut queue) =mpsc::channel::<(Arc<RwLock<server::init::server>>,Vec<u8>,Vec<u8>,SocketAddr,)>(1024);
+pub fn RequestPool() -> mpsc::Sender<(Arc<RwLock<server::init::server>>,Vec<u8>,Vec<u8>,SocketAddr,i64)> {
+    let (sender, mut queue) =mpsc::channel::<(Arc<RwLock<server::init::server>>,Vec<u8>,Vec<u8>,SocketAddr,i64)>(1024);
     let worker_queue =InitWorkers(4);
     tokio::spawn(async move {
         let mut previous_receiver:Option<oneshot::Receiver<bool>> =None;
 
-        while let Some((server,operation,payload,client_addr,)) = queue.recv().await{
+        while let Some((server,operation,payload,client_addr,req_id)) = queue.recv().await{
             let (signal_sender,signal_receiver ) = oneshot::channel::<bool>();
 
             let previous =previous_receiver.take();
@@ -28,6 +28,7 @@ pub fn RequestPool() -> mpsc::Sender<(Arc<RwLock<server::init::server>>,Vec<u8>,
                         previous,
                         signal_sender,
                         client_addr,
+                        req_id
                     ))
                     .await
             {
@@ -48,6 +49,7 @@ type WorkerRequest = (
     Option<oneshot::Receiver<bool>>,
     oneshot::Sender<bool>,
     SocketAddr,
+    i64
 );
 
 fn InitWorkers(worker_count: usize) -> mpsc::Sender<WorkerRequest> {
@@ -75,6 +77,7 @@ fn InitWorkers(worker_count: usize) -> mpsc::Sender<WorkerRequest> {
                     previous_receiver,
                     signal_sender,
                     client_addr,
+                    req_id
                 )) = worker_queue.recv().await
                 {
                     let result =HandleOperation(&server,operation.clone(),payload).await;
@@ -98,7 +101,7 @@ fn InitWorkers(worker_count: usize) -> mpsc::Sender<WorkerRequest> {
                                     };
 
                                     if let Err(e) =
-                                        partition_worker_pool.send((Arc::clone(&server),partition,value,client_addr)).await{
+                                        partition_worker_pool.send((Arc::clone(&server),partition,value,client_addr,req_id)).await{
                                         eprintln!("Failed to queue partition write: {}",e);
                                     }
 
@@ -120,7 +123,7 @@ fn InitWorkers(worker_count: usize) -> mpsc::Sender<WorkerRequest> {
                                             group_name,
                                             start_point,
                                             client_addr,
-
+                                            req_id
                                         ))
                                         .await
                                     {
@@ -130,6 +133,35 @@ fn InitWorkers(worker_count: usize) -> mpsc::Sender<WorkerRequest> {
                                         );
                                     }
                                     let _ =signal_sender.send(true);
+                                }
+                                Some(OperationResult::Leader { socket_addr }) => {
+                                    if let Some(previous_receiver) = previous_receiver {
+                                        if let Err(e) = previous_receiver.await {
+                                            eprintln!("Previous request signal failed: {}", e);
+                                        }
+                                    }
+
+                                    let mut addr_buf = socket_addr.to_string().into_bytes();
+
+                                    let response_writer_signal = {
+                                        let server_guard = server.read().await;
+                                        server_guard.response_pool.clone()
+                                    };
+
+                                    if let Err(e) = response_writer_signal
+                                        .send((
+                                            Arc::clone(&server),
+                                            client_addr,
+                                            true,
+                                            addr_buf,
+                                            req_id
+                                        ))
+                                        .await
+                                    {
+                                        eprintln!("Failed to queue leader response: {}", e);
+                                    }
+
+                                    let _ = signal_sender.send(true);
                                 }
                                 None=>{
                                      let response_writer_signal = {
@@ -145,6 +177,7 @@ fn InitWorkers(worker_count: usize) -> mpsc::Sender<WorkerRequest> {
                                         client_addr,
                                         true,
                                         Vec::new(),
+                                        req_id
                                     ))
                                     .await
                             {
@@ -199,6 +232,7 @@ fn InitWorkers(worker_count: usize) -> mpsc::Sender<WorkerRequest> {
                                         client_addr,
                                         false,
                                         e.to_string().into_bytes(),
+                                        req_id
                                     ))
                                     .await
                             {
@@ -249,6 +283,11 @@ enum OperationResult {
         group_name: Vec<u8>,
         start_point: Vec<u8>,
     },
+
+
+    Leader{
+        socket_addr: SocketAddr,
+    }
 }
 
 
@@ -258,7 +297,7 @@ enum OperationResult {
 async fn HandleOperation(server: &Arc<RwLock<server::init::server>>,operation: Vec<u8>,payload: Vec<u8>) -> Result<Option<OperationResult>,Box<dyn std::error::Error + Send + Sync>,> {
     let operation =String::from_utf8(operation)
             .map_err(|e| { format!("Invalid operation UTF-8: {}",e)})?;
-
+    // println!("SErver: opeartio si {}",operation);
     match operation.trim() {
         "topic_insert" => {
             let (topic_name_buf,payload,) = Simplify(payload)?;
@@ -367,6 +406,26 @@ async fn HandleOperation(server: &Arc<RwLock<server::init::server>>,operation: V
             let (start_buf,_)=Simplify(payload)?;
 
             Ok(Some(OperationResult::Subscribe { topic: topic_name_buf, group_name: group_name_buf, start_point: start_buf }))
+        }
+
+        "who_leader" => {
+            let leader_addr = {
+                let server_guard = server.read().await;
+
+                server_guard.leader_socket_addr
+            };  
+
+
+            match leader_addr {
+                Some(socket_addr) => {
+                    Ok(Some(OperationResult::Leader { socket_addr }))
+                }
+
+                None => {
+                    // No leader has been elected yet.
+                    Ok(None)
+                }
+            }
         }
 
         unknown => {

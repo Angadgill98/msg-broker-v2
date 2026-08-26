@@ -11,6 +11,7 @@ pub type ConsumerPoolRequest = (
     Arc<RwLock<partition::Partition>>,
     Vec<u8>,
     SocketAddr,
+    i64
 );
 struct ConsumerWorkerTask {
     request: ConsumerPoolRequest,
@@ -50,6 +51,7 @@ pub fn ConsumerPool(worker_count: usize,) -> mpsc::Sender<ConsumerPoolRequest> {
                     partition,
                     value,
                     client_addr,
+                    req_id
                 ) = request;
 
                 // println!(
@@ -101,6 +103,7 @@ pub fn ConsumerPool(worker_count: usize,) -> mpsc::Sender<ConsumerPoolRequest> {
                                 consumer.consumer_addr,
                                 true,
                                 value.clone(),
+                                req_id
                             ))
                             .await
                     {
@@ -188,6 +191,7 @@ pub type ConsumerRequest = (
     Vec<u8>,
     Vec<u8>,
     SocketAddr,
+    i64
 );
 pub fn ConsumerReg() -> mpsc::Sender<ConsumerRequest> {
     let (sender, mut receiver) = mpsc::channel::<ConsumerRequest>(1024);
@@ -199,6 +203,7 @@ pub fn ConsumerReg() -> mpsc::Sender<ConsumerRequest> {
             group_name,
             startpoint,
             client_addr,
+            req_id
         )) = receiver.recv().await
         {
             // -------------------------------------------------
@@ -395,6 +400,7 @@ for partition in topic.partitions.values() {
                     client_addr,
                     true,
                     consumer_id.to_be_bytes().to_vec(),
+                    req_id
                 ))
                 .await
             {

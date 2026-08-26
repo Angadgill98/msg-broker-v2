@@ -433,6 +433,7 @@ impl Controller {
                     {
                         let mut leader_addr_lock = self.leader_addr.write().await;
                         *leader_addr_lock = Some(leader_addr);
+                        
                     }
 
                     // This controller is not the leader

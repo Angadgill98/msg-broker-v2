@@ -1,8 +1,8 @@
 use std::{ collections::HashMap, net::SocketAddr};
 use rand::RngExt;
-use tokio::sync::oneshot;
+use tokio::{net::TcpStream, sync::oneshot};
 
-use crate::{brokers, controller, error::ConrtollerError};
+use crate::{brokers::{self, Brokers_config}, controller, error::ConrtollerError};
 
 
 
@@ -15,6 +15,7 @@ pub struct Cluster{
     replica:u64,
 
     brokers_config:Vec<brokers::Brokers_config>,
+
 }
 
 #[derive(Debug)]
@@ -115,13 +116,14 @@ impl Cluster {
     }
 
 
-    
-    pub async fn ExecuteBrokerConfig(&self,controller_config:Config){
+
+    pub async fn ExecuteBrokerConfig(&self,controller_config:Config)->Vec<Brokers_config>{
         for broker_config in &self.brokers_config{
             let broker=brokers::broker::new(broker_config,controller_config.clone()).await;
             let socket=brokers::CreateBrokerSocket(broker.ip).await;
             let a=broker.StartBroker(socket).await;
         }
+        self.brokers_config.clone()
     }
 }
 

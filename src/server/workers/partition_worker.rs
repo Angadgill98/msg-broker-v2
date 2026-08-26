@@ -11,6 +11,7 @@ pub type PartitionPoolRequest = (
     Arc<RwLock<partition::Partition>>,
     Vec<u8>,
     SocketAddr,
+    i64
 );
 struct PartitionWorkerTask {
     request: PartitionPoolRequest,
@@ -50,6 +51,7 @@ pub fn PartitionPool(worker_count: usize,) -> mpsc::Sender<PartitionPoolRequest>
                     partition,
                     value,
                     client_addr,
+                    req_id
                 ) = request;
 
                 // println!(
@@ -96,6 +98,7 @@ pub fn PartitionPool(worker_count: usize,) -> mpsc::Sender<PartitionPoolRequest>
                                     client_addr,
                                     true,
                                     Vec::new(),
+                                    req_id
                                 ))
                                 .await
                         {
@@ -111,6 +114,7 @@ pub fn PartitionPool(worker_count: usize,) -> mpsc::Sender<PartitionPoolRequest>
                                 Arc::clone(&partition),
                                 value,
                                 client_addr,
+                                req_id
                             ))
                             .await
                         {
@@ -132,6 +136,7 @@ pub fn PartitionPool(worker_count: usize,) -> mpsc::Sender<PartitionPoolRequest>
                                     client_addr,
                                     false,
                                     error_message,
+                                    req_id
                                 ))
                                 .await
                         {
