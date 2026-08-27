@@ -96,86 +96,86 @@ impl Cli {
                 // INSERT
                 // =====================================================
 
-                // "insert" => {
-                //     if parts.len() != 4 {
-                //         println!(
-                //             "Usage: insert <topic> <key> <value>"
-                //         );
-                //         continue;
-                //     }
+                "insert" => {
+                    if parts.len() != 4 {
+                        println!(
+                            "Usage: insert <topic> <key> <value>"
+                        );
+                        continue;
+                    }
 
-                //     let topic =
-                //         parts[1].to_string();
+                    let topic =
+                        parts[1].to_string();
 
-                //     let key =
-                //         if parts[2] == "-" {
-                //             None
-                //         } else {
-                //             Some(parts[2].to_string())
-                //         };
+                    let key =
+                        if parts[2] == "-" {
+                            None
+                        } else {
+                            Some(parts[2].to_string())
+                        };
 
-                //     let value =
-                //         parts[3].to_string();
+                    let value =
+                        parts[3].to_string();
 
-                //     if let Err(e) = client
-                //         .send_topic_data(
-                //             topic,
-                //             key,
-                //             value,
-                //         )
-                //         .await
-                //     {
-                //         eprintln!(
-                //             "Request failed: {}",
-                //             e
-                //         );
-                //     }
-                // }
+                    if let Err(e) = client
+                        .send_topic_data(
+                            topic,
+                            key,
+                            value,
+                        )
+                        .await
+                    {
+                        eprintln!(
+                            "Request failed: {}",
+                            e
+                        );
+                    }
+                }
 
                 // // =====================================================
                 // // SUBSCRIBE
                 // // =====================================================
 
-                // "subscribe" => {
-                //     if parts.len() != 4 {
-                //         println!(
-                //             "Usage: subscribe <topic> <group_name> <start_point>"
-                //         );
-                //         continue;
-                //     }
+                "subscribe" => {
+                    if parts.len() != 4 {
+                        println!(
+                            "Usage: subscribe <topic> <group_name> <start_point>"
+                        );
+                        continue;
+                    }
 
-                //     let topic =
-                //         parts[1].to_string();
+                    let topic =
+                        parts[1].to_string();
 
-                //     let group_name =
-                //         parts[2].to_string();
+                    let group_name =
+                        parts[2].to_string();
 
-                //     let start_point: usize =
-                //         match parts[3].parse() {
-                //             Ok(v) => v,
+                    let start_point: usize =
+                        match parts[3].parse() {
+                            Ok(v) => v,
 
-                //             Err(_) => {
-                //                 println!(
-                //                     "Invalid start point"
-                //                 );
-                //                 continue;
-                //             }
-                //         };
+                            Err(_) => {
+                                println!(
+                                    "Invalid start point"
+                                );
+                                continue;
+                            }
+                        };
 
-                //     if let Err(e) = client
-                //         .subscribe(
-                //             topic,
-                //             group_name,
-                //             start_point,
-                //         )
-                //         .await
-                //     {
-                //         eprintln!(
-                //             "Subscribe failed: {}",
-                //             e
-                //         );
-                //     }
-                // }
+                    if let Err(e) = client
+                        .subscribe(
+                            topic,
+                            group_name,
+                            start_point,
+                        )
+                        .await
+                    {
+                        eprintln!(
+                            "Subscribe failed: {}",
+                            e
+                        );
+                    }
+                }
 
                 // =====================================================
                 // UNKNOWN COMMAND

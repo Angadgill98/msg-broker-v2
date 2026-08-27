@@ -318,7 +318,7 @@ impl broker{
 
                             // payload.extend_from_slice(&addr_len);
                             // payload.extend_from_slice(addr_buf);
-
+                            // println!("final ahdnle op op and payload {:?}  {:?}",operation,payload);
                             if let Err(e) =request_pool
                                 .send((
                                     Arc::clone(

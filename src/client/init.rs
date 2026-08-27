@@ -508,166 +508,9 @@
 //         Ok(())
 //     }
 
-//     pub async fn subscribe(
-//         &mut self,
-//         topic: String,
-//         group_name: String,
-//         start_point: usize,
-//     ) -> Result<(), Box<dyn Error>> {
-
-//         let mut buf = Vec::new();
-
-//         // -------------------------------------------------
-//         // Operation
-//         // -------------------------------------------------
-
-//         let op = b"subscribe";
-//         let op_len = (op.len() as u64).to_be_bytes();
-
-//         buf.extend_from_slice(&op_len);
-//         buf.extend_from_slice(op);
-
-//         // -------------------------------------------------
-//         // Topic
-//         // -------------------------------------------------
-
-//         let topic_buf = topic.as_bytes();
-//         let topic_len = (topic_buf.len() as u64).to_be_bytes();
-
-//         buf.extend_from_slice(&topic_len);
-//         buf.extend_from_slice(topic_buf);
-
-//         // -------------------------------------------------
-//         // Key
-//         // -------------------------------------------------
-
-//         let grp_buf = group_name.as_bytes();
-//         let grp_len = (grp_buf.len() as u64).to_be_bytes();
-
-//         buf.extend_from_slice(&grp_len);
-//         buf.extend_from_slice(grp_buf);
-
-//         // -------------------------------------------------
-//         // Start point
-//         // -------------------------------------------------
-
-//         let start_point_buf = (start_point as u64).to_be_bytes();
-
-//         let start_point_len =
-//             (start_point_buf.len() as u64).to_be_bytes();
-
-//         buf.extend_from_slice(&start_point_len);
-//         buf.extend_from_slice(&start_point_buf);
-
-//         // -------------------------------------------------
-//         // Send request
-//         // -------------------------------------------------
-
-//         self.request_queue_signal
-//             .send(buf)
-//             .await?;
-
-//         Ok(())
-//     }
-
-//     pub async fn get_leader_stream(&mut self,) -> Result<(), Box<dyn Error>> {
-
-//         loop {
-//             // Try every broker we currently know.
-//             for (_broker_addr, broker_stream) in self.brokers_sockets.iter_mut() {
-
-//                 let command = b"who_leader";
-
-//                 let mut buf = Vec::new();
-
-//                 // command length
-//                 buf.extend_from_slice(&(command.len() as u64).to_be_bytes());
-
-//                 // command
-//                 buf.extend_from_slice(command);
-
-//                 // payload length = 0
-//                 buf.extend_from_slice(&0u64.to_be_bytes());
-
-//                 // Ask broker
-//                 if let Err(e) = broker_stream.write_all(&buf).await {
-//                     eprintln!("Failed to ask broker for leader: {}", e);
-//                     continue;
-//                 }
-
-//                 // Read address length
-//                 let mut len_buf = [0u8; 8];
-
-//                 if let Err(e) = broker_stream.read_exact(&mut len_buf).await {
-//                     eprintln!("Failed to read leader address length: {}", e);
-//                     continue;
-//                 }
-
-//                 let addr_len = u64::from_be_bytes(len_buf) as usize;
-
-//                 // Broker doesn't know leader yet
-//                 if addr_len == 0 {
-//                     continue;
-//                 }
-
-//                 // Read address
-//                 let mut addr_buf = vec![0u8; addr_len];
-
-//                 if let Err(e) = broker_stream.read_exact(&mut addr_buf).await {
-//                     eprintln!("Failed to read leader address: {}", e);
-//                     continue;
-//                 }
-
-//                 let leader_addr = match String::from_utf8(addr_buf)
-//                     .ok()
-//                     .and_then(|s| s.parse::<SocketAddr>().ok())
-//                 {
-//                     Some(addr) => addr,
-
-//                     None => {
-//                         eprintln!("Broker returned invalid leader address");
-//                         continue;
-//                     }
-//                 };
-
-//                 println!("Client found leader at {}", leader_addr);
-
-//                 // Connect directly to the leader controller.
-//                 match TcpStream::connect(leader_addr).await {
-//                     Ok(stream) => {
-//                         self.leader_controller = Some(stream);
-
-//                         println!(
-//                             "Client connected to leader controller {}",
-//                             leader_addr
-//                         );
-
-//                         return Ok(());
-//                     }
-
-//                     Err(e) => {
-//                         eprintln!(
-//                             "Failed to connect to leader {}: {}",
-//                             leader_addr, e
-//                         );
-
-//                         continue;
-//                     }
-//                 }
-//             }
-
-//             // Nobody knows the leader yet.
-//             println!("No leader found, retrying...");
-
-//             tokio::time::sleep(
-//                 tokio::time::Duration::from_millis(1000)
-//             ).await;
-//         }
-//     }
-
 // }
 
-use std::{collections::HashMap, error::Error, net::SocketAddr};
+use std::{collections::HashMap, error::Error, hash::{DefaultHasher, Hash, Hasher}, net::SocketAddr};
 
 use rand::RngExt;
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpStream, tcp::{OwnedReadHalf, OwnedWriteHalf}}, sync::{mpsc, oneshot}};
@@ -1147,6 +990,10 @@ impl client{
         }
     }
 
+   
+   
+   
+   
     pub async fn insert_topic(&mut self,topic_name: String,partition_no: u64) -> Result<(), Box<dyn Error>> {
         
         match self.get_leader_stream().await {
@@ -1238,9 +1085,164 @@ impl client{
         Ok(())
     }
 
+    pub async fn send_topic_data(&mut self,topic: String,key: Option<String>,value: String,) -> Result<(), Box<dyn Error>> {
+        let mut buf = Vec::new();
+        let mut final_buf = Vec::new();
+
+
+        let op = b"topic_data_insert";
+        let op_len = (op.len() as u64).to_be_bytes();
+
+        final_buf.extend_from_slice(&op_len);
+        final_buf.extend_from_slice(op);
+
+
+        let topic_buf = topic.as_bytes();
+        let topic_len = (topic_buf.len() as u64).to_be_bytes();
+
+        buf.extend_from_slice(&topic_len);
+        buf.extend_from_slice(topic_buf);
+        
+
+        let mut keybuf=Vec::new();
+        match key {
+            Some(s) => {
+                let key_buf = s.as_bytes();
+                let key_len = (key_buf.len() as u64).to_be_bytes();
+                keybuf=key_buf.to_vec();
+                buf.extend_from_slice(&key_len);
+                buf.extend_from_slice(key_buf);
+            }
+
+            None => {
+                buf.extend_from_slice(&0u64.to_be_bytes());
+            }
+        }
+
+        let value_buf = value.as_bytes();
+        let value_len = (value_buf.len() as u64).to_be_bytes();
+
+        buf.extend_from_slice(&value_len);
+        buf.extend_from_slice(value_buf);
+
+
+
+        let partitions=self.metadata.get(&topic).unwrap();
+
+        let partition_no=partitions.len();
+
+        let global_partitiion_no=self.Hashkey(&keybuf, partition_no);
+
+        let (broker_ip,local_partition_no)=partitions.get(&(global_partitiion_no as u64)).unwrap();
+
+        let sender=self.brokers_stream.get_mut(broker_ip).unwrap();
+
+        let no_buf=local_partition_no.to_be_bytes();
+
+        let len=(no_buf.len() as u64 ).to_be_bytes();
+
+        buf.extend_from_slice(&len);
+        buf.extend_from_slice(&no_buf);
+
+        let buf_len = (buf.len() as u64).to_be_bytes();
+        final_buf.extend_from_slice(&buf_len);
+        final_buf.extend_from_slice(&buf);
+
+
+        let(response_sender,response_receiver)=oneshot::channel::<Vec<u8>>();
+
+        sender.send((final_buf,Some(response_sender))).await.unwrap();
+        let a=response_receiver.await.unwrap();
+
+        println!("res is {:?}",a);
+
+        // Send to server
+
+        Ok(())
+    }
+
+    fn Hashkey(&self,topic: &Vec<u8>,partition_count: usize)->usize{
+        let mut hasher =DefaultHasher::new();
+
+        topic.hash(&mut hasher);
+
+        let hash = hasher.finish();
+
+        (hash as usize)% partition_count
+    }
+
+
+
+    pub async fn subscribe(&mut self,topic: String,group_name: String,start_point: usize,) -> Result<(), Box<dyn Error>> {
+
+        let mut buf = Vec::new();
+        let mut final_buf = Vec::new();
+
+        // -------------------------------------------------
+        // Operation
+        // -------------------------------------------------
+
+        let op = b"subscribe";
+        let op_len = (op.len() as u64).to_be_bytes();
+
+        final_buf.extend_from_slice(&op_len);
+        final_buf.extend_from_slice(op);
+
+        // -------------------------------------------------
+        // Topic
+        // -------------------------------------------------
+
+        let topic_buf = topic.as_bytes();
+        let topic_len = (topic_buf.len() as u64).to_be_bytes();
+
+        buf.extend_from_slice(&topic_len);
+        buf.extend_from_slice(topic_buf);
+
+        // -------------------------------------------------
+        // Key
+        // -------------------------------------------------
+
+        let grp_buf = group_name.as_bytes();
+        let grp_len = (grp_buf.len() as u64).to_be_bytes();
+
+        buf.extend_from_slice(&grp_len);
+        buf.extend_from_slice(grp_buf);
+
+        // -------------------------------------------------
+        // Start point
+        // -------------------------------------------------
+
+        let start_point_buf = (start_point as u64).to_be_bytes();
+
+        let start_point_len =
+            (start_point_buf.len() as u64).to_be_bytes();
+
+        buf.extend_from_slice(&start_point_len);
+        buf.extend_from_slice(&start_point_buf);
+
+
+
+        let len=(buf.len() as u64).to_be_bytes();
+
+        final_buf.extend_from_slice(&len);
+        final_buf.extend_from_slice(&buf);        
+        // -------------------------------------------------
+        // Send request
+        // -------------------------------------------------
+
+        if let Some(stream) = &mut self.leader_stream {
+            stream.write_all(&final_buf).await.unwrap();
+        
+        };
+        Ok(())
+    }
+
 
     
 }
+
+
+
 
 
 

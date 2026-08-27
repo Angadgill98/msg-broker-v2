@@ -4,6 +4,15 @@ use tokio::sync::{RwLock, mpsc, oneshot};
 
 use crate::server::{self, partition, topic, workers::consumer_worker};
 
+#[derive(Clone, serde::Serialize, serde::Deserialize,Debug)]
+pub struct ConsumerAssignment {
+    pub topic: Vec<u8>,
+    pub group_name: Vec<u8>,
+    pub consumer_id: u64,
+    pub consumer_addr: SocketAddr,
+    pub local_partition: u64,
+}
+
 pub fn RequestPool() -> mpsc::Sender<(Arc<RwLock<server::init::server>>,Vec<u8>,Vec<u8>,SocketAddr,i64)> {
     let (sender, mut queue) =mpsc::channel::<(Arc<RwLock<server::init::server>>,Vec<u8>,Vec<u8>,SocketAddr,i64)>(1024);
     let worker_queue =InitWorkers(4);
@@ -348,7 +357,15 @@ async fn HandleOperation(server: &Arc<RwLock<server::init::server>>,operation: V
 
             let (key_buf,payload) = Simplify(payload)?;
 
-            let (value_buf,_,) = Simplify(payload)?;
+            let (value_buf,payload,) = Simplify(payload)?;
+
+            let (local_partition_id_buf, _) = Simplify(payload)?;
+
+            let local_partition_id = u64::from_be_bytes(
+                local_partition_id_buf
+                    .try_into()
+                    .map_err(|_| "Invalid local partition ID")?
+            ) as usize;
 
             let partition = {
                 let server_guard =server.read().await;
@@ -383,7 +400,7 @@ async fn HandleOperation(server: &Arc<RwLock<server::init::server>>,operation: V
 
                 let partition_id =key_buf_hash% partition_no;
 
-                let partition =topic.partitions.get(&partition_id)
+                let partition =topic.partitions.get(&local_partition_id)
                         .ok_or_else(|| {
                             format!(
                                 "Partition {} not found for topic",
@@ -391,6 +408,7 @@ async fn HandleOperation(server: &Arc<RwLock<server::init::server>>,operation: V
                             )
                         })?;
 
+                println!("partiotn id we sent is {} adn which artion got seledted {:?}",local_partition_id,partition);
                 Arc::clone(partition)
             };
 
@@ -432,6 +450,57 @@ async fn HandleOperation(server: &Arc<RwLock<server::init::server>>,operation: V
             }
         }
 
+        "consumer_assignment"=>{
+            let assignments:Vec<ConsumerAssignment> =serde_json::from_slice(&payload)?;
+            println!("Server/broker:asssignments   {:?}",assignments);
+            
+            for assignment in assignments {
+                let topic_name_buf=assignment.topic;
+                let server_guard =server.read().await;
+
+                let shard =
+                    server_guard.GetShard(&topic_name_buf,server_guard.shard_count,);
+
+                let topic_map =server_guard.shard_map.get(&shard)
+                        .ok_or_else(|| {
+                            format!("Shard {} not found",shard.0)
+                        })?;
+
+                let topic_map_guard =topic_map.read().await;
+
+                let topic =topic_map_guard.get(&topic_name_buf)
+                        .ok_or_else(|| {
+                            format!(
+                                "Topic '{}' does not exist",
+                                String::from_utf8_lossy(
+                                    &topic_name_buf
+                                )
+                            )
+                        })?;
+
+                let local_partition_id =assignment.local_partition as usize;
+
+                
+
+                let partition =topic.partitions.get(&local_partition_id)
+                .ok_or_else(|| {
+                    format!(
+                        "Partition {} not found for topic",
+                        local_partition_id
+                    )
+                })?;
+
+                let partition_guard=partition.read().await;
+                let consumers=partition_guard.consumers.write().await;
+
+            
+
+            }
+
+
+            Ok(None)
+        }
+       
         unknown => {
             Err(
                 format!(
