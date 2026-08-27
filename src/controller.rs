@@ -1,5 +1,6 @@
 use std::{collections::HashMap, f32::consts::E, fmt::write, hash::{DefaultHasher, Hash, Hasher}, net::SocketAddr, str::from_utf8, sync::Arc};
 
+use serde::{Deserialize, Serialize};
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpSocket, TcpStream, tcp::{OwnedReadHalf, OwnedWriteHalf}}, sync::{RwLock, mpsc, oneshot}};
 
 use crate::{cluster::{self, Controller_Config}, error::ConrtollerError};
@@ -36,56 +37,33 @@ pub struct Controller{
 
     partitions:RwLock<HashMap <Vec<u8>,HashMap<u64, (SocketAddr, u64)>>>,
 
-    consumer_groups:RwLock<HashMap<Vec<u8>, Vec<ConsumerInfo>>>,
     //unique id for each consumer i.e a counter
     consumer_id:RwLock<u64>,
 
 
-    consumer_grps:RwLock<HashMap<Vec<u8>,Arc<RwLock<grp>>>>
-
+    consumer_grps:RwLock<HashMap<Vec<u8>,grp>>
 }
 
-#[derive(Clone, serde::Serialize, serde::Deserialize,Debug)]
+#[derive(Debug)]
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ConsumerInfo {
     pub consumer_id: u64,
     pub consumer_addr: SocketAddr,
     pub start_point: u64,
 }
 
-#[derive(Clone, serde::Serialize, serde::Deserialize,Debug)]
-pub struct ConsumerAssignment {
-    pub topic: Vec<u8>,
-    pub group_name: Vec<u8>,
-    pub consumer_id: u64,
-    pub consumer_addr: SocketAddr,
-    pub local_partition: u64,
-}
 
 
-#[derive(Clone, serde::Serialize, serde::Deserialize,Debug)]
-
+#[derive(Debug)]
 struct grp{
     consumers:Vec<ConsumerInfo>,
-    topics:HashMap<Vec<u8>,Vec<ConsumerInfo>>,
-}
-
-
-struct partition{
-    global_id
-    local_id
-    broker_ip
-    consumers
+    topics:HashMap<Vec<u8>,HashMap<u64,(SocketAddr, u64,ConsumerInfo)>>,
 }
 
 
 
-use serde::{Deserialize, Serialize};
-#[derive(Serialize, Deserialize, Debug)]
-struct PartitionMapping {
-    global_partition: u64,
-    broker_addr: SocketAddr,
-    local_partition: u64,
-}
+
 
 
 #[derive(Debug)]
@@ -145,7 +123,6 @@ impl Controller {
             broker_sockets:RwLock::new(HashMap::new()),
             broker_ids:RwLock::new(HashMap::new()),
             partitions:RwLock::new(HashMap::new()),
-            consumer_groups:RwLock::new(HashMap::new()),
             consumer_id:RwLock::new(0),
 
 
@@ -929,88 +906,6 @@ impl Controller {
                 println!("Broker connected: id={}, ip={}", broker_id, broker_ip);
             }
 
-
-            // b"subscribe"=>{
-            //     // println!("{:?}",payload);
-
-                // let (topic_buf,payload)=self.Simplify(payload);
-
-                // let (group_name_buf,payload) = self.Simplify(payload);
-
-                // let (start_buf,_)=self.Simplify(payload);
-
-                // let start_point = u64::from_be_bytes(start_buf.try_into().map_err(|_| "Invalid start point").unwrap());
-
-
-            //     let consumer_id = {
-            //         let mut id = self.consumer_id.write().await;
-
-            //         let current = *id;
-            //         *id += 1;
-
-            //         current
-            //     };
-
-            //     let consumer = ConsumerInfo {
-            //         consumer_id,
-            //         consumer_addr: client_addr,
-            //         start_point,
-            //     };
-
-            //     // -----------------------------------------
-            //     // Add consumer to its group
-            //     // -----------------------------------------
-
-            //     {
-            //         let mut groups =
-            //             self.consumer_groups.write().await;
-
-            //         groups
-            //             .entry(group_name_buf.clone())
-            //             .or_insert_with(Vec::new)
-            //             .push(consumer);
-            //     }
-
-            //     // -----------------------------------------
-            //     // Rebalance this group and send to broker 
-            //     // -----------------------------------------
-
-            //     self.rebalance_consumers(topic_buf.clone(),group_name_buf.clone(),).await.unwrap();
-            //     println!("consumer grp after rebalacing {:?}",self.consumer_groups);
-
-            //     // -----------------------------------------
-            //     // ACK consumer
-            //     // -----------------------------------------
-
-            //     let writer = {
-            //         let clients = self.clients.read().await;
-
-            //         clients
-            //             .get(&client_addr)
-            //             .ok_or("Client not found").unwrap()
-            //             .clone()
-            //     };
-
-            //     let response =
-            //         consumer_id.to_be_bytes();
-
-            //     let mut message = Vec::new();
-
-            //     message.extend_from_slice(
-            //         &(response.len() as u64).to_be_bytes()
-            //     );
-
-            //     message.extend_from_slice(&response);
-
-            //     writer
-            //         .write()
-            //         .await
-            //         .write_all(&message)
-            //         .await.unwrap();
-            // }     
-         
-
-
             b"subscribe"=>{
 
                 let (topic_buf,payload)=self.Simplify(payload);
@@ -1021,46 +916,114 @@ impl Controller {
 
                 let start_point = u64::from_be_bytes(start_buf.try_into().map_err(|_| "Invalid start point").unwrap());
 
-                let consumer_id_guard=self.consumer_id.read().await;
+                let mut consumer_id_guard = self.consumer_id.write().await;
 
-                let consumer_id=*consumer_id_guard;
+                let consumer_id = *consumer_id_guard;
+                *consumer_id_guard += 1;
 
-                let consumer=ConsumerInfo{
+                let consumer = ConsumerInfo {
                     consumer_id,
-                    consumer_addr:client_addr,
-                    start_point
+                    consumer_addr: client_addr,
+                    start_point,
                 };
 
-                let group = {
-                    let mut consumer_grp_guard = self.consumer_grps.write().await;
+                
 
-                    if let Some(group) = consumer_grp_guard.get(&group_name_buf) {
-                        Arc::clone(group)
-                    } else {
-                        let group = grp {
-                            consumers: Vec::new(),
-                            topics: HashMap::new(),
-                        };
+                let isexist= self.consumer_grps.read().await.contains_key(&group_name_buf);
 
-                        let group = Arc::new(RwLock::new(group));
+                if !isexist{
+                    let group=grp{
+                        consumers:Vec::new(),
+                        topics:HashMap::new()
+                    };
 
-                        consumer_grp_guard.insert(group_name_buf.clone(), Arc::clone(&group));
+                    self.consumer_grps.write().await.insert(group_name_buf.clone(), group);
+                }
 
-                        group
+                let mut guard=self.consumer_grps.write().await;
+
+                let group=guard.get_mut(&group_name_buf).unwrap();
+                
+                let mut topic_partitions={
+                    let mut partition_guard=self.partitions.write().await;
+
+                    let isexist= group.topics.contains_key(&topic_buf);
+
+                    if isexist{
+                        let a =group.topics.get(&topic_buf).unwrap();
+                        a.clone()
+                    }else{
+                        let a=partition_guard.get_mut(&topic_buf).unwrap().clone();
+
+
+                        let mut new_map=HashMap::new();
+                        for (gloabal_partition,(broker_ip,local_no)) in a{
+                            new_map.insert(gloabal_partition,(broker_ip,local_no,consumer.clone()));
+                        }
+                        group.topics.insert(topic_buf.clone(), new_map.clone());
+                        new_map
                     }
+                    
                 };
-                let mut a=Vec::new();
-                a.push(consumer.clone());
-                group.write().await.topics.insert(topic_buf, a );
+
+                group.consumers.push(consumer.clone());
+
+                let consumer_count = group.consumers.len();
+                let partition_count = topic_partitions.len();
+
+                if consumer_count <= partition_count {
+                    for (index, (_, (_, _, assigned_consumer))) in
+                        topic_partitions.iter_mut().enumerate()
+                    {
+                        *assigned_consumer =
+                            group.consumers[index % consumer_count].clone();
+                    }
+                }
+                group.topics.insert(topic_buf.clone(), topic_partitions.clone());
 
 
-                group.write().await.consumers.push(consumer);
+                let reponse=serde_json::to_vec(&topic_partitions).unwrap();
 
+
+                let len =(reponse.len() as u64).to_be_bytes();
+
+
+                let mut buf=Vec::new();
+
+                buf.extend_from_slice(&len);
+                buf.extend_from_slice(&reponse);
+
+                let id=consumer.consumer_id.to_be_bytes();
+                let len =(id.len() as u64).to_be_bytes();
+
+                buf.extend_from_slice(&len);
+                buf.extend_from_slice(&id);
+
+                let mut final_buf=Vec::new();
+                let len =(buf.len() as u64).to_be_bytes();
+
+                final_buf.extend_from_slice(&len);
+                final_buf.extend_from_slice(&buf);
+                
+                let writer={
+                    let a =self.clients.read().await;
+                    let b=a.get(&client_addr).unwrap();
+                    Arc::clone(&b)
+                    
+                };
+
+                // println!("Sedning  resposne {:?}",final_buf);
+
+                writer.write().await.write_all(&final_buf).await.unwrap();
+
+                
 
 
 
 
             }
+           
+           
             _=>{
         // println!("{:?}",payload);
                 
@@ -1084,199 +1047,7 @@ impl Controller {
         (data, remaining)
     }
 
-    async fn rebalance_consumers(&self,topic: Vec<u8>,group: Vec<u8>,) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-
-        // -----------------------------------------
-        // Get consumers in this group
-        // -----------------------------------------
-
-        let consumers = {
-            let groups =
-                self.consumer_groups.read().await;
-
-            groups
-                .get(&group)
-                .cloned()
-                .unwrap_or_default()
-        };
-
-        if consumers.is_empty() {
-            return Ok(());
-        }
-
-        // -----------------------------------------
-        // Get global partition mapping
-        //
-        // global -> (broker, local)
-        // -----------------------------------------
-
-        let partition_mapping = {
-            let partitions =
-                self.partitions.read().await;
-
-            partitions
-                .get(&topic)
-                .cloned()
-                .ok_or("Topic partition mapping not found")?
-        };
-
-        let total_partitions =
-            partition_mapping.len();
-
-        if total_partitions == 0 {
-            return Ok(());
-        }
-
-        // -----------------------------------------
-        // broker -> assignments
-        //
-        // We will send each broker ONLY the
-        // partitions it owns.
-        // -----------------------------------------
-
-        let mut broker_assignments:
-            HashMap<SocketAddr, Vec<ConsumerAssignment>>
-            = HashMap::new();
-
-        // -----------------------------------------
-        // GLOBAL PARTITION ASSIGNMENT
-        // -----------------------------------------
-
-        for global_partition in 0..total_partitions as u64 {
-
-            let consumer_index =
-                global_partition as usize
-                    % consumers.len();
-
-            let consumer =
-                &consumers[consumer_index];
-
-            // -------------------------------------
-            // Find broker + local partition
-            // -------------------------------------
-
-            let (broker_addr, local_partition) =
-                partition_mapping
-                    .get(&global_partition)
-                    .ok_or("Global partition not found")?;
-
-            // -------------------------------------
-            // Create assignment
-            // -------------------------------------
-
-            let assignment = ConsumerAssignment {
-                topic: topic.clone(),
-                group_name: group.clone(),
-                consumer_id: consumer.consumer_id,
-                consumer_addr: consumer.consumer_addr,
-                local_partition: *local_partition,
-            };
-
-            broker_assignments
-                .entry(*broker_addr)
-                .or_default()
-                .push(assignment);
-        }
-
-        // -----------------------------------------
-        // Send complete new assignment to brokers
-        // -----------------------------------------
-
-        for (broker_addr, assignments) in broker_assignments {
-            // -----------------------------------------
-            // Serialize assignment payload
-            // -----------------------------------------
-
-            let payload = serde_json::to_vec(&assignments)?;
-
-            // -----------------------------------------
-            // Mock request ID
-            // -----------------------------------------
-
-            let req_id: i64 = 0;
-            let req_id_buf = req_id.to_be_bytes();
-            let req_id_len = (req_id_buf.len() as u64).to_be_bytes();
-
-            // -----------------------------------------
-            // Operation
-            // -----------------------------------------
-
-            let operation = b"consumer_assignment";
-            let operation_len =
-                (operation.len() as u64).to_be_bytes();
-
-            // -----------------------------------------
-            // Payload
-            // -----------------------------------------
-
-            let payload_len =
-                (payload.len() as u64).to_be_bytes();
-
-            // -----------------------------------------
-            // Construct ONE request
-            //
-            // [req_id_len]
-            // [req_id]
-            // [operation_len]
-            // [operation]
-            // [payload_len]
-            // [payload]
-            // -----------------------------------------
-
-            let mut request = Vec::new();
-
-            request.extend_from_slice(&req_id_len);
-            request.extend_from_slice(&req_id_buf);
-
-            request.extend_from_slice(&operation_len);
-            request.extend_from_slice(operation);
-
-            request.extend_from_slice(&payload_len);
-            request.extend_from_slice(&payload);
-
-            // -----------------------------------------
-            // Mock batch
-            //
-            // Only ONE request in this batch
-            // -----------------------------------------
-
-            let request_count: u64 = 1;
-
-            let batch_length =
-                request.len() as u64;
-
-            let mut batch = Vec::new();
-
-            // [request_count]
-            batch.extend_from_slice(
-                &request_count.to_be_bytes()
-            );
-
-            // [batch_length]
-            batch.extend_from_slice(
-                &batch_length.to_be_bytes()
-            );
-
-            // [request]
-            batch.extend_from_slice(&request);
-
-            // -----------------------------------------
-            // Send to broker
-            // -----------------------------------------
-
-            let mut sockets =
-                self.broker_sockets.write().await;
-
-            let stream = sockets
-                .get_mut(&broker_addr)
-                .ok_or("Broker socket not found")?;
-
-            stream.write_all(&batch).await?;
-        }
-
-        Ok(())
-    }
-
+    
 
 }
 

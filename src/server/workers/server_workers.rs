@@ -1,17 +1,20 @@
-use std::{error::Error, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, error::Error, net::SocketAddr, sync::Arc};
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, mpsc, oneshot};
 
-use crate::server::{self, partition, topic, workers::consumer_worker};
+use crate::server::{self, consumer, partition, topic, workers::consumer_worker};
 
-#[derive(Clone, serde::Serialize, serde::Deserialize,Debug)]
-pub struct ConsumerAssignment {
-    pub topic: Vec<u8>,
-    pub group_name: Vec<u8>,
+
+#[derive(Debug)]
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ConsumerInfo {
     pub consumer_id: u64,
     pub consumer_addr: SocketAddr,
-    pub local_partition: u64,
+    pub start_point: u64,
 }
+
 
 pub fn RequestPool() -> mpsc::Sender<(Arc<RwLock<server::init::server>>,Vec<u8>,Vec<u8>,SocketAddr,i64)> {
     let (sender, mut queue) =mpsc::channel::<(Arc<RwLock<server::init::server>>,Vec<u8>,Vec<u8>,SocketAddr,i64)>(1024);
@@ -89,7 +92,7 @@ fn InitWorkers(worker_count: usize) -> mpsc::Sender<WorkerRequest> {
                     req_id
                 )) = worker_queue.recv().await
                 {
-                    let result =HandleOperation(&server,operation.clone(),payload).await;
+                    let result =HandleOperation(&server,operation.clone(),payload,client_addr.clone()).await;
 
                     
                     match result {
@@ -302,7 +305,7 @@ enum OperationResult {
 
 
 
-async fn HandleOperation(server: &Arc<RwLock<server::init::server>>,operation: Vec<u8>,payload: Vec<u8>) -> Result<Option<OperationResult>,Box<dyn std::error::Error + Send + Sync>,> {
+async fn HandleOperation(server: &Arc<RwLock<server::init::server>>,operation: Vec<u8>,payload: Vec<u8>,client_addr:SocketAddr) -> Result<Option<OperationResult>,Box<dyn std::error::Error + Send + Sync>,> {
     let operation =String::from_utf8(operation)
             .map_err(|e| { format!("Invalid operation UTF-8: {}",e)})?;
     // println!("SErver: opeartio si {} adn paylaod is {:?}",operation,payload);
@@ -408,7 +411,7 @@ async fn HandleOperation(server: &Arc<RwLock<server::init::server>>,operation: V
                             )
                         })?;
 
-                println!("partiotn id we sent is {} adn which artion got seledted {:?}",local_partition_id,partition);
+                // println!("partiotn id we sent is {} adn which artion got seledted {:?}",local_partition_id,partition);
                 Arc::clone(partition)
             };
 
@@ -451,11 +454,21 @@ async fn HandleOperation(server: &Arc<RwLock<server::init::server>>,operation: V
         }
 
         "consumer_assignment"=>{
-            let assignments:Vec<ConsumerAssignment> =serde_json::from_slice(&payload)?;
-            println!("Server/broker:asssignments   {:?}",assignments);
-            
-            for assignment in assignments {
-                let topic_name_buf=assignment.topic;
+            let (topic_name_buf, payload) = Simplify(payload)?;
+
+            let (group_name_buf, payload) = Simplify(payload)?;
+
+            let (start_point_buf, payload) = Simplify(payload)?;
+
+            let (partition_buf, payload) = Simplify(payload)?;
+
+            let (consumer_buf, _) = Simplify(payload)?;
+
+            let consumerinfo:ConsumerInfo=serde_json::from_slice(&consumer_buf)?;
+
+            let local_partition_id =usize::from_be_bytes(partition_buf.try_into().unwrap());
+           
+            let partition = {
                 let server_guard =server.read().await;
 
                 let shard =
@@ -478,26 +491,34 @@ async fn HandleOperation(server: &Arc<RwLock<server::init::server>>,operation: V
                             )
                         })?;
 
-                let local_partition_id =assignment.local_partition as usize;
-
                 
 
+
+
                 let partition =topic.partitions.get(&local_partition_id)
-                .ok_or_else(|| {
-                    format!(
-                        "Partition {} not found for topic",
-                        local_partition_id
-                    )
-                })?;
+                        .ok_or_else(|| {
+                            format!(
+                                "Partition {} not found for topic",
+                                local_partition_id
+                            )
+                        })?;
 
-                let partition_guard=partition.read().await;
-                let consumers=partition_guard.consumers.write().await;
+                // println!("partiotn id we sent is {} adn which artion got seledted {:?}",local_partition_id,partition);
+                Arc::clone(partition)
+            };
 
-            
+            let consumers=Arc::clone(&partition.write().await.consumers);
 
-            }
-
-
+            let consumer=consumer::Consumer{
+                consumer_id:consumerinfo.consumer_id as i64,
+                consumer_addr:client_addr,
+                start_point:consumerinfo.start_point as usize,
+                offset:0,
+                group_name:group_name_buf
+            };
+            consumers.write().await.clear();
+            consumers.write().await.push(consumer);
+            println!("consumers for topic {:?} are {:?}",topic_name_buf,consumers);
             Ok(None)
         }
        

@@ -95,14 +95,38 @@ pub fn ConsumerPool(worker_count: usize,) -> mpsc::Sender<ConsumerPoolRequest> {
                 };
 
                 for consumer in consumers_list {
+                    let mut value=value.clone();
 
+                    let mut buf = Vec::new();
+
+                    // "consumer"
+                    let response_type = b"consumer";
+                    let type_len = (response_type.len() as u64).to_be_bytes();
+
+                    buf.extend_from_slice(&type_len);
+                    buf.extend_from_slice(response_type);
+
+                    // consumer_id
+                    let consumer_id = consumer.consumer_id.to_be_bytes();
+                    let consumer_id_len = (consumer_id.len() as u64).to_be_bytes();
+
+                    buf.extend_from_slice(&consumer_id_len);
+                    buf.extend_from_slice(&consumer_id);
+
+                    // value
+                    let value_len = (value.len() as u64).to_be_bytes();
+
+                    buf.extend_from_slice(&value_len);
+                    buf.extend_from_slice(&value);
+
+                    // println!("Sedin to customer {:?}",buf);
                     if let Err(send_err) =
                         response_writer_signal
                             .send((
                                 Arc::clone(&server),
                                 consumer.consumer_addr,
                                 true,
-                                value.clone(),
+                                buf,
                                 req_id
                             ))
                             .await

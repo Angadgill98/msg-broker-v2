@@ -1,523 +1,22 @@
-// use std::collections::HashMap;
-// use std::error::Error;
-// use std::net::SocketAddr;
 
-// use tokio::io::{AsyncReadExt, AsyncWriteExt};
-// use tokio::net::TcpStream;
-// use tokio::net::tcp::OwnedWriteHalf;
-// use tokio::sync::mpsc::{self, Receiver, Sender};
-// use tokio::sync::watch;
 
-// use crate::brokers;
-// use crate::consumer::inti::consumer;
-// use crate::producer::init::producer;
-
-
-
-
-
-// pub struct client{
-//     // socket:OwnedWriteHalf,
-//     consumer:consumer,
-//     producer:producer,
-
-//     request_queue_signal:Sender<Vec<u8>>,
-//     response_signal: watch::Receiver<Vec<u8>>,
-//     consumer_socket:Sender<Vec<u8>>,
-
-//     brokers_sockets:HashMap<SocketAddr,TcpStream>,
-//     leader_controller:Option<TcpStream>,
-
-//     data:HashMap<String,SocketAddr>
-
-// }
-
-
-
-
-// impl client {
-//     pub async fn init(brokers_config:Vec<brokers::Brokers_config>) -> Result<Self, Box<dyn Error>> {
-//         let socket = client::CreateSocket().await?;
-
-//         let (mut reader, writer) = socket.into_split();
-
-//         let (response_tx, response_rx) =watch::channel(Vec::<u8>::new());
-
-//         let response_tx_clone = response_tx.clone();
-
-    
-//         tokio::spawn(async move {
-//             loop {
-//                 // -------------------------
-//                 // Read ACK
-//                 // -------------------------
-//                 let mut ack_buf = [0u8; 1];
-
-//                 if let Err(e) = reader.read_exact(&mut ack_buf).await {
-//                     eprintln!("Server connection closed: {}", e);
-//                     break;
-//                 }
-
-//                 let ack = ack_buf[0] == 1;
-
-//                 // -------------------------
-//                 // Read response length
-//                 // -------------------------
-//                 let mut len_buf = [0u8; 8];
-
-//                 if let Err(e) = reader.read_exact(&mut len_buf).await {
-//                     eprintln!("Failed to read response length: {}", e);
-//                     break;
-//                 }
-
-//                 let len = u64::from_be_bytes(len_buf) as usize;
-
-//                 // -------------------------
-//                 // Read response
-//                 // -------------------------
-//                 let mut response = vec![0u8; len];
-
-//                 if let Err(e) = reader.read_exact(&mut response).await {
-//                     eprintln!("Failed to read response: {}", e);
-//                     break;
-//                 }
-
-//                 // -------------------------
-//                 // Handle response
-//                 // -------------------------
-
-//                 if ack {
-//                     println!("ACK recived");
-//                     println!("Response: {:?}", response);
-//                     let _ =response_tx_clone.send(response);
-//                 } else {
-//                     println!(
-//                         "Request failed: {}",
-//                         String::from_utf8_lossy(&response)
-//                     );
-//                 }
-//             }
-//         });
-
-
-//         let consumer_socket: TcpStream=client::CreateSocket().await?;
-
-//         let(mut consumer_reader,consumer_writer)=consumer_socket.into_split();
-
-//         let (consumer_response_tx, consumer_response_rx) =mpsc::channel(1024);
-
-//         tokio::spawn(async move {
-//             loop {
-//                 // -------------------------
-//                 // Read ACK
-//                 // -------------------------
-//                 let mut ack_buf = [0u8; 1];
-
-//                 if let Err(e) = consumer_reader.read_exact(&mut ack_buf).await {
-//                     eprintln!("Server connection closed: {}", e);
-//                     break;
-//                 }
-
-//                 let ack = ack_buf[0] == 1;
-
-//                 // -------------------------
-//                 // Read response length
-//                 // -------------------------
-//                 let mut len_buf = [0u8; 8];
-
-//                 if let Err(e) = consumer_reader.read_exact(&mut len_buf).await {
-//                     eprintln!("Failed to read response length: {}", e);
-//                     break;
-//                 }
-
-//                 let len = u64::from_be_bytes(len_buf) as usize;
-
-//                 // -------------------------
-//                 // Read response
-//                 // -------------------------
-//                 let mut response = vec![0u8; len];
-
-//                 if let Err(e) = consumer_reader.read_exact(&mut response).await {
-//                     eprintln!("Failed to read response: {}", e);
-//                     break;
-//                 }
-
-//                 // -------------------------
-//                 // Handle response
-//                 // -------------------------
-
-//                 if ack {
-//                     println!("ACK recived");
-//                     println!("Response: {:?}", response);
-//                 } else {
-//                     println!(
-//                         "Request failed: {}",
-//                         String::from_utf8_lossy(&response)
-//                     );
-//                 }
-//             }
-//         });
-
-      
-
-//         let mut map=HashMap::new();
-
-//         for config in brokers_config{
-//             let socket=TcpStream::connect(config.ip.clone()).await.unwrap();
-//             map.insert(config.ip, socket);
-//         }
-
-
-
-//         Ok(Self {
-            
-//             consumer: consumer::new(),
-//             producer: producer::new(),
-//             request_queue_signal:client::RequestQueue(writer),
-//             response_signal:response_rx,
-//             consumer_socket:consumer_response_tx,
-
-//             brokers_sockets:map,
-//             leader_controller:None,
-
-//             data:HashMap::new()
-
-//         })
-//     }
-
-    
-//     fn RequestQueue(mut stream: OwnedWriteHalf) -> Sender<Vec<u8>> {
-//         let (sender, mut receiver) = mpsc::channel::<Vec<u8>>(1024);
-
-//         tokio::spawn(async move {
-//             const MAX_BATCH_SIZE: usize = 64 * 1024;
-//             const MAX_REQUESTS: u64 = 100;
-//             const BATCH_TIMEOUT: std::time::Duration =
-//                 std::time::Duration::from_millis(1);
-
-//             let mut buffer = Vec::new();
-//             let mut request_count: u64 = 0;
-
-//             loop {
-//                 let request = if request_count == 0 {
-//                     match receiver.recv().await {
-//                         Some(request) => request,
-//                         None => break,
-//                     }
-//                 } else {
-//                     match tokio::time::timeout(
-//                         BATCH_TIMEOUT,
-//                         receiver.recv(),
-//                     )
-//                     .await
-//                     {
-//                         Ok(Some(request)) => request,
-
-//                         Ok(None) => {
-//                             break;
-//                         }
-
-//                         Err(_) => {
-//                             // -----------------------------
-//                             // Timeout -> flush batch
-//                             // -----------------------------
-
-//                             let buffer_len =
-//                                 buffer.len() as u64;
-
-//                             let mut batch =
-//                                 Vec::with_capacity(
-//                                     16 + buffer.len()
-//                                 );
-
-//                             // Number of requests
-//                             batch.extend_from_slice(
-//                                 &request_count.to_be_bytes()
-//                             );
-
-//                             // Total buffer length
-//                             batch.extend_from_slice(
-//                                 &buffer_len.to_be_bytes()
-//                             );
-
-//                             // All requests
-//                             batch.extend_from_slice(&buffer);
-
-//                             if let Err(e) =
-//                                 stream.write_all(&batch).await
-//                             {
-//                                 eprintln!(
-//                                     "Failed to send batch: {}",
-//                                     e
-//                                 );
-//                                 break;
-//                             }
-
-//                             buffer.clear();
-//                             request_count = 0;
-
-//                             continue;
-//                         }
-//                     }
-//                 };
-
-//                 // -----------------------------
-//                 // Add request to batch
-//                 // -----------------------------
-
-//                 let request_len =
-//                     (request.len() as u64).to_be_bytes();
-
-//                 buffer.extend_from_slice(&request_len);
-//                 buffer.extend_from_slice(&request);
-
-//                 request_count += 1;
-
-//                 // -----------------------------
-//                 // Flush if batch is full
-//                 // -----------------------------
-
-//                 if buffer.len() >= MAX_BATCH_SIZE
-//                     || request_count >= MAX_REQUESTS
-//                 {
-//                     let buffer_len =
-//                         buffer.len() as u64;
-
-//                     let mut batch =
-//                         Vec::with_capacity(
-//                             16 + buffer.len()
-//                         );
-
-//                     // Number of requests
-//                     batch.extend_from_slice(
-//                         &request_count.to_be_bytes()
-//                     );
-
-//                     // Total buffer length
-//                     batch.extend_from_slice(
-//                         &buffer_len.to_be_bytes()
-//                     );
-
-//                     // All requests
-//                     batch.extend_from_slice(&buffer);
-
-//                     // Send
-//                     if let Err(e) =
-//                         stream.write_all(&batch).await
-//                     {
-//                         eprintln!(
-//                             "Failed to send batch: {}",
-//                             e
-//                         );
-//                         break;
-//                     }
-
-//                     // Reset
-//                     buffer.clear();
-//                     request_count = 0;
-//                 }
-//             }
-
-//             // -----------------------------
-//             // Flush remaining requests
-//             // -----------------------------
-
-//             if request_count > 0 {
-//                 let buffer_len =
-//                     buffer.len() as u64;
-
-//                 let mut batch =
-//                     Vec::with_capacity(
-//                         16 + buffer.len()
-//                     );
-
-//                 // Number of requests
-//                 batch.extend_from_slice(
-//                     &request_count.to_be_bytes()
-//                 );
-
-//                 // Total buffer length
-//                 batch.extend_from_slice(
-//                     &buffer_len.to_be_bytes()
-//                 );
-
-//                 // All requests
-//                 batch.extend_from_slice(&buffer);
-
-//                 if let Err(e) =
-//                     stream.write_all(&batch).await
-//                 {
-//                     eprintln!(
-//                         "Failed to send final batch: {}",
-//                         e
-//                     );
-//                 }
-//             }
-//         });
-
-//         sender
-//     }
-
-    
-//     pub async fn CreateSocket() -> Result<TcpStream, Box<dyn Error>> {
-//         let addr = std::env::var("server_addr")
-//             .map_err(|_| "Environment variable 'server_addr' not defined")?;
-
-//         let stream = TcpStream::connect(addr).await?;
-
-//         Ok(stream)
-//     }
-
-//     // pub async fn insert_topic(&mut self,topic_name: String,partition_no: u64) -> Result<(), Box<dyn Error>> {
-        
-//     //     self.leader_controller
-        
-//     //     let op = "topic_insert".as_bytes();
-//     //     let op_len = (op.len() as u64).to_be_bytes();
-
-//     //     let topic_buf = topic_name.as_bytes();
-//     //     let topic_len = (topic_buf.len() as u64).to_be_bytes();
-
-//     //     let partition_buf = partition_no.to_be_bytes();
-
-//     //     let mut buf = Vec::new();
-
-//     //     buf.extend_from_slice(&op_len);
-//     //     buf.extend_from_slice(op);
-
-//     //     buf.extend_from_slice(&topic_len);
-//     //     buf.extend_from_slice(topic_buf);
-
-//     //     buf.extend_from_slice(&partition_buf);
-
-//     //     // Total payload length
-//     //     // let buf_len = (buf.len() as u64).to_be_bytes();
-
-//     //     // let mut final_buf = Vec::new();
-
-//     //     // final_buf.extend_from_slice(&buf_len);
-//     //     // final_buf.extend_from_slice(&buf);
-
-//     //     // Send to server
-//     //     self.request_queue_signal.send(buf).await?;
-
-//     //     let res=self.response_signal.borrow().clone();
-
-//     //     self.response_signal.changed().await?;
-
-//     //     let res = self.response_signal.borrow().clone();
-//     //     println!("res came ");
-//     //     Ok(())
-//     // }
-
-
-//     pub async fn insert_topic(&mut self,topic_name: String,partition_no: u64,) -> Result<(), Box<dyn Error>> {
-
-//     // Make sure we have a leader connection.
-//     if self.leader_controller.is_none() {
-//         self.get_leader_stream().await?;
-//     }
-
-//     // At this point leader_controller MUST exist.
-//     let leader = self
-//         .leader_controller
-//         .as_mut()
-//         .ok_or("Leader controller not available")?;
-
-//     let op = b"topic_insert";
-//     let op_len = (op.len() as u64).to_be_bytes();
-
-//     let topic_buf = topic_name.as_bytes();
-//     let topic_len = (topic_buf.len() as u64).to_be_bytes();
-
-//     let partition_buf = partition_no.to_be_bytes();
-
-//     let mut buf = Vec::new();
-
-//     buf.extend_from_slice(&op_len);
-//     buf.extend_from_slice(op);
-
-//     buf.extend_from_slice(&topic_len);
-//     buf.extend_from_slice(topic_buf);
-
-//     buf.extend_from_slice(&partition_buf);
-
-//     leader.write_all(&buf).await?;
-
-//     // Wait for response
-//     self.response_signal.changed().await?;
-
-//     let res = self.response_signal.borrow().clone();
-
-//     println!("res came: {:?}", res);
-
-//     Ok(())
-// }
-
-//     pub async fn send_topic_data(
-//         &mut self,
-//         topic: String,
-//         key: Option<String>,
-//         value: String,
-//     ) -> Result<(), Box<dyn Error>> {
-//         let mut buf = Vec::new();
-
-//         let op = b"topic_data_insert";
-//         let op_len = (op.len() as u64).to_be_bytes();
-
-//         buf.extend_from_slice(&op_len);
-//         buf.extend_from_slice(op);
-
-//         let topic_buf = topic.as_bytes();
-//         let topic_len = (topic_buf.len() as u64).to_be_bytes();
-
-//         buf.extend_from_slice(&topic_len);
-//         buf.extend_from_slice(topic_buf);
-
-//         match key {
-//             Some(s) => {
-//                 let key_buf = s.as_bytes();
-//                 let key_len = (key_buf.len() as u64).to_be_bytes();
-
-//                 buf.extend_from_slice(&key_len);
-//                 buf.extend_from_slice(key_buf);
-//             }
-
-//             None => {
-//                 buf.extend_from_slice(&0u64.to_be_bytes());
-//             }
-//         }
-
-//         let value_buf = value.as_bytes();
-//         let value_len = (value_buf.len() as u64).to_be_bytes();
-
-//         buf.extend_from_slice(&value_len);
-//         buf.extend_from_slice(value_buf);
-
-//         // Total payload length
-//         // let buf_len = (buf.len() as u64).to_be_bytes();
-
-//         // let mut final_buf = Vec::with_capacity(8 + buf.len());
-
-//         // final_buf.extend_from_slice(&buf_len);
-//         // final_buf.extend_from_slice(&buf);
-
-//         // Send to server
-//         self.request_queue_signal.send(buf).await?;
-
-//         Ok(())
-//     }
-
-// }
-
-use std::{collections::HashMap, error::Error, hash::{DefaultHasher, Hash, Hasher}, net::SocketAddr};
+use std::{collections::HashMap, error::Error, hash::{DefaultHasher, Hash, Hasher}, net::SocketAddr, sync::Arc};
 
 use rand::RngExt;
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpStream, tcp::{OwnedReadHalf, OwnedWriteHalf}}, sync::{mpsc, oneshot}};
+use serde::{Deserialize, Serialize};
+use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpStream, tcp::{OwnedReadHalf, OwnedWriteHalf}}, sync::{RwLock, mpsc, oneshot}};
 
 use crate::brokers;
 
 
+#[derive(Debug)]
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ConsumerInfo {
+    pub consumer_id: u64,
+    pub consumer_addr: SocketAddr,
+    pub start_point: u64,
+}
 
 
 
@@ -532,6 +31,9 @@ pub struct client {
     brokers_stream:HashMap<SocketAddr,mpsc::Sender<(Vec<u8>, Option<oneshot::Sender<Vec<u8>>>)>>,
 
     leader_stream: Option<TcpStream>,
+
+
+    consumers:Arc<RwLock<HashMap<u64,mpsc::Sender<String>>>>,
 }
 
 
@@ -540,11 +42,13 @@ impl client{
         let mut map=HashMap::new();
         let (client_bck_sender,client_bck_reciever)=mpsc::channel::<(Vec<u8>,i64)>(1024);
         let responser_queue=client::StartClientBackgroundReader(client_bck_reciever);
+        let consumers=Arc::new(RwLock::new(HashMap::new()));
+        let consumer_pool_sender=client::StartConsumerPool(Arc::clone(&consumers));
 
         for config in brokers_config{
             let socket=TcpStream::connect(config.ip.clone()).await.unwrap();
             let (reader,writer)=socket.into_split();
-            client::StartBrokerBackgroundReader(reader, client_bck_sender.clone());
+            client::StartBrokerBackgroundReader(reader, client_bck_sender.clone(),consumer_pool_sender.clone());
             let dispatcher=client::StartBrokerRequestDispatcher(writer,responser_queue.clone());
             map.insert(config.ip,dispatcher);
         }
@@ -553,11 +57,12 @@ impl client{
             metadata:HashMap::new(),
             brokers_stream:map,
             leader_stream:None,
+            consumers
         }
 
     }
 
-    fn StartBrokerBackgroundReader(mut reader:OwnedReadHalf,client_bck_sender:mpsc::Sender<(Vec<u8>,i64)>){
+    fn StartBrokerBackgroundReader(mut reader:OwnedReadHalf,client_bck_sender:mpsc::Sender<(Vec<u8>,i64)>,consumer_pool_sender:mpsc::Sender<Vec<u8>>){
         tokio::spawn(async move{
             loop {
 
@@ -584,8 +89,20 @@ impl client{
                 
                 let mut response = vec![0u8; len];
                 reader.read_exact(&mut response).await.unwrap();
-
                 // println!("Broker: response received {:?}",response);
+
+                {
+                    if let Ok((is_consumer_response, payload)) = Simplify(response.clone()) {
+                        if is_consumer_response == b"consumer" {
+                            consumer_pool_sender.send(payload).await.unwrap();
+                            continue;
+                        }
+                    }
+                }
+                
+
+                let res_len=(response.len() as u64).to_be_bytes();
+
 
                 let mut final_buf=Vec::new();
                 final_buf.extend_from_slice(&res_len);
@@ -603,6 +120,52 @@ impl client{
 
             }
         });
+    }
+
+    fn StartConsumerPool(consumers:Arc<RwLock<HashMap<u64,mpsc::Sender<String>>>>)->mpsc::Sender<Vec<u8>>{
+        let consumers=consumers;
+        let (consumer_pool_sender,mut queue)=mpsc::channel::<Vec<u8>>(1024);
+        tokio::spawn(async move{
+
+            while let Some(response) = queue.recv().await {
+
+            // Get consumer ID
+            let (consumer_id_buf, payload) =
+                Simplify(response).unwrap();
+
+            let consumer_id = u64::from_be_bytes(
+                consumer_id_buf
+                    .try_into()
+                    .unwrap()
+            );
+
+            // Get value
+            let (value_buf, _) =
+                Simplify(payload).unwrap();
+
+            let value =
+                String::from_utf8(value_buf).unwrap();
+
+            // println!(
+            //     "Consumer ID: {}, Value: {}",
+            //     consumer_id,
+            //     value
+            // );
+
+            // Find consumer and send value
+            let consumer_sender = {
+                let guard = consumers.read().await;
+                guard.get(&consumer_id).cloned()
+            };
+
+            if let Some(sender) = consumer_sender {
+                sender.send(value).await.unwrap();
+            }
+        }
+
+
+        });
+        consumer_pool_sender
     }
 
     fn StartClientBackgroundReader(mut client_bck_reciever: mpsc::Receiver<(Vec<u8>, i64)>) -> mpsc::Sender<(oneshot::Sender<Vec<u8>>, i64)> {
@@ -627,7 +190,7 @@ impl client{
 
                     Some((response, req_id)) =client_bck_reciever.recv() => {
                         if let Some(sender) =waiting.remove(&req_id){
-                            // println!("Cleint: response is {:?} adn req id is {:?}",response,req_id);
+                            println!("Cleint: response is {:?} adn req id is {:?}",response,req_id);
 
                             if let Err(_) = sender.send(response) {
                                 eprintln!(
@@ -654,7 +217,7 @@ impl client{
         response_reader
     }
 
-    fn StartBrokerRequestDispatcher(mut writer: OwnedWriteHalf,response_queue: mpsc::Sender<(oneshot::Sender<Vec<u8>>, i64)>) -> mpsc::Sender<(Vec<u8>, Option<oneshot::Sender<Vec<u8>>>)> {
+    fn StartBrokerRequestDispatcher(mut writer: OwnedWriteHalf,response_queue: mpsc::Sender<(oneshot::Sender<Vec<u8>>, i64)>,) -> mpsc::Sender<(Vec<u8>, Option<oneshot::Sender<Vec<u8>>>)> {
 
         let (dispatcher, mut queue) =
             mpsc::channel::<(Vec<u8>, Option<oneshot::Sender<Vec<u8>>>)>(1024);
@@ -1232,8 +795,125 @@ impl client{
 
         if let Some(stream) = &mut self.leader_stream {
             stream.write_all(&final_buf).await.unwrap();
-        
+
+            // Read payload length
+            let mut len_buf = [0u8; 8];
+            stream.read_exact(&mut len_buf).await.unwrap();
+
+            let len = u64::from_be_bytes(len_buf) as usize;
+
+            // Read payload
+            let mut payload = vec![0u8; len];
+            stream.read_exact(&mut payload).await.unwrap();
+
+            let(consumer_arrangement,payload)=Simplify(payload).unwrap();
+
+            // Deserialize the complete topics map
+            let topic_partitions: HashMap<u64,(SocketAddr, u64, ConsumerInfo)> = serde_json::from_slice(&consumer_arrangement).unwrap();
+
+            let(consumer_id_buf,payload)=Simplify(payload).unwrap();
+            
+            let consumer_id = u64::from_be_bytes(
+                consumer_id_buf.try_into().unwrap()
+            );
+
+            // println!("Received topics: {:?}", topic_partitions);
+            
+            
+            let (sender,mut receiver)=mpsc::channel::<String>(1024);
+            self.consumers.write().await.insert(consumer_id.clone(), sender);
+
+
+
+
+
+            let op = b"consumer_assignment";
+            let op_len = (op.len() as u64).to_be_bytes();
+
+            
+            for (global_partition, (broker_ip, local_partition_no, consumer)) in &topic_partitions {
+                
+
+                let mut buf=Vec::new();
+                let mut final_buf=Vec::new();
+                
+                    // -------------------------
+                    // Operation
+                    // -------------------------
+
+                    final_buf.extend_from_slice(&op_len);
+                    final_buf.extend_from_slice(op);
+
+                    // -------------------------
+                    // Topic
+                    // -------------------------
+
+                    buf.extend_from_slice(&topic_len);
+                    buf.extend_from_slice(topic_buf);
+
+                    // -------------------------
+                    // Group name
+                    // -------------------------
+
+                    let group_len = (grp_buf.len() as u64).to_be_bytes();
+
+                    buf.extend_from_slice(&group_len);
+                    buf.extend_from_slice(grp_buf);
+
+                    // -------------------------
+                    // Start point
+                    // -------------------------
+
+                    buf.extend_from_slice(&start_point_len);
+                    buf.extend_from_slice(&start_point_buf);
+
+                    // -------------------------
+                    // Local partition
+                    // -------------------------
+
+                    let partition_buf = local_partition_no.to_be_bytes();
+                    let partition_len = (partition_buf.len() as u64).to_be_bytes();
+
+                    buf.extend_from_slice(&partition_len);
+                    buf.extend_from_slice(&partition_buf);
+
+                    let consumer_buf=serde_json::to_vec(consumer).unwrap();
+                    let len=(consumer_buf.len() as u64).to_be_bytes();
+
+                    buf.extend_from_slice(&len);
+                    buf.extend_from_slice(&consumer_buf);
+
+                    // -------------------------
+                    // Complete payload
+                    // -------------------------
+
+                    let buf_len = (buf.len() as u64).to_be_bytes();
+
+                    final_buf.extend_from_slice(&buf_len);
+                    final_buf.extend_from_slice(&buf);
+
+                    let sender = self.brokers_stream
+                        .get_mut(broker_ip)
+                        .unwrap();
+
+                    sender.send((final_buf, None)).await.unwrap();
+
+            }
+         
+         
+
+            //this is req when we wan tht subscriber to actiberly lsiten to msg
+            // tokio::spawn(async move {
+            //     while let Some(payload) = receiver.recv().await {
+            //         println!("Received: {:?}", payload);
+            //     }
+            // });
+
         };
+
+        
+        
+
         Ok(())
     }
 
