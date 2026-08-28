@@ -93,19 +93,7 @@ impl Controller {
             }
         }?;
 
-        // let mut map=HashMap::new();
-        // for peer in peers_config.clone(){
-        //     if peer.id == controller.id {
-        //         continue;
-        //     }
-        //     let (reader,writer,addr,controller_id)= CreatePeerSockets(peer).await?;
-        //     map.insert(addr, peer{
-        //         reader,
-        //         writer,
-        //         id:controller_id,
-        //     });
-        // }
-
+       
         Ok(Self{
             id:controller.id,
             port:controller.port,
@@ -1068,24 +1056,6 @@ pub async fn CreatePeerSockets(peer_config:Controller_Config)->Result<(OwnedRead
 
     Ok((read,write,String::new(),peer_config.id))
 }
-
-
-
-
-struct LeaderController(Controller);
-
-
-impl LeaderController{
-    fn new(controller:Controller)->Self{
-        Self(controller)
-    }
-
-
-    fn SendHearBeatToPeers(&self){
-
-    }
-}
-
 
 
 fn SendHeartBeats(controller: Arc<Controller>) {

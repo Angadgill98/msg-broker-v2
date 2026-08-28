@@ -22,9 +22,6 @@ pub struct ConsumerInfo {
 
 
 
-
-
-
 pub struct client {
     metadata: HashMap<String, HashMap<u64, (SocketAddr, u64)>>,
 
